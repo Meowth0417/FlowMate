@@ -106,8 +106,6 @@ interface ToolbarAction {
   icon: ComponentType<{ className?: string }>
 }
 
-const AGENT_HINT_NAMES = new Set(['gemini'])
-
 interface AgentPanelState {
   modelId: string
   effort: string
@@ -299,12 +297,22 @@ export function WorkspacePage() {
 
   useEffect(() => {
     if (!selectedTask || !selectedStage || !currentUser || !isAgentStage(selectedStage.key) || selectedStage.status !== 'running') {
+      if (processIntervalRef.current !== null) {
+        window.clearInterval(processIntervalRef.current)
+        processIntervalRef.current = null
+      }
       setProcessEvents([])
       setProcessRunning(false)
       return
     }
 
     let cancelled = false
+    const stopPolling = () => {
+      if (processIntervalRef.current !== null) {
+        window.clearInterval(processIntervalRef.current)
+        processIntervalRef.current = null
+      }
+    }
 
     const loadProcess = async () => {
       try {
@@ -314,8 +322,13 @@ export function WorkspacePage() {
         }
         setProcessEvents(result.events)
         setProcessRunning(result.running)
+        if (!result.running) {
+          stopPolling()
+          void refreshTasks()
+        }
       } catch {
         if (!cancelled) {
+          stopPolling()
           setProcessEvents([])
           setProcessRunning(false)
         }
@@ -329,12 +342,9 @@ export function WorkspacePage() {
 
     return () => {
       cancelled = true
-      if (processIntervalRef.current !== null) {
-        window.clearInterval(processIntervalRef.current)
-        processIntervalRef.current = null
-      }
+      stopPolling()
     }
-  }, [currentUser, selectedTask, selectedStage])
+  }, [currentUser, refreshTasks, selectedTask, selectedStage])
 
   useEffect(() => {
     if (!selectedTask) {
@@ -938,6 +948,12 @@ function StagePromptCard({
   const agentMenuRef = useRef<HTMLDivElement | null>(null)
   const [agentMenuOpen, setAgentMenuOpen] = useState(false)
   const selectedAgentOption = agentStatusByName(agents, selectedAgent)
+  const selectedAgentPanel = selectedAgentOption ? (agentPanels[selectedAgent] ?? defaultAgentPanelState(selectedAgentOption)) : null
+  const selectedAgentModel =
+    selectedAgentOption && selectedAgentPanel
+      ? agentModelOptionById(selectedAgentOption, selectedAgentPanel.modelId) ?? selectedAgentOption.models?.[0] ?? null
+      : null
+  const selectedAgentEffort = selectedAgentPanel?.effort?.trim() ?? ''
 
   useEffect(() => {
     if (!textareaRef.current) {
@@ -989,11 +1005,15 @@ function StagePromptCard({
             <button
               type="button"
               onClick={() => setAgentMenuOpen((current) => !current)}
-              className="inline-flex size-8 items-center justify-center rounded-full border border-border bg-background transition-colors hover:bg-muted/30"
-              title={`当前 Agent：${selectedAgent}`}
-              aria-label={`当前 Agent：${selectedAgent}`}
+              className="inline-flex h-8 max-w-[220px] items-center gap-1.5 rounded-full border border-border bg-background px-2.5 text-xs transition-colors hover:bg-muted/30"
+              title={`当前 Agent：${selectedAgentOption?.name ?? selectedAgent}${selectedAgentModel ? ` / ${agentModelLabel(selectedAgentModel)}` : ''}${selectedAgentEffort ? ` / ${selectedAgentEffort}` : ''}`}
+              aria-label={`当前 Agent：${selectedAgentOption?.name ?? selectedAgent}${selectedAgentModel ? ` ${agentModelLabel(selectedAgentModel)}` : ''}${selectedAgentEffort ? ` ${selectedAgentEffort}` : ''}`}
             >
-              <AgentIcon agentName={selectedAgentOption?.name ?? selectedAgent} className="size-4" />
+              <AgentIcon agentName={selectedAgentOption?.name ?? selectedAgent} className="size-3.5 shrink-0" />
+              <span className="truncate font-medium text-foreground">
+                {selectedAgentModel ? agentModelLabel(selectedAgentModel) : selectedAgentOption?.name ?? selectedAgent}
+              </span>
+              {selectedAgentEffort ? <span className="shrink-0 font-medium lowercase text-muted-foreground">{selectedAgentEffort}</span> : null}
             </button>
             {agentMenuOpen ? (
               <AgentSelectorCard
@@ -1036,11 +1056,13 @@ function AgentSelectorCard({
 }) {
   const [panelAgent, setPanelAgent] = useState<AgentOptionId>(selectedAgent)
   const [expandedSection, setExpandedSection] = useState<'models' | 'effort' | 'fast'>('models')
+  const [openIssueAgent, setOpenIssueAgent] = useState<AgentOptionId | ''>('')
 
   useEffect(() => {
     const nextAgent = agentStatusByName(agents, selectedAgent)?.name ?? preferredAgentName(agents, selectedAgent)
     setPanelAgent(nextAgent)
     setExpandedSection('models')
+    setOpenIssueAgent('')
   }, [agents, selectedAgent])
 
   const panelOption = agentStatusByName(agents, panelAgent)
@@ -1067,6 +1089,7 @@ function AgentSelectorCard({
         <div className="space-y-0.5">
           {agents.map((agent) => {
             const active = agent.name === panelAgent
+            const issue = agentIssueReason(agent)
             return (
               <div
                 key={agent.name}
@@ -1083,14 +1106,34 @@ function AgentSelectorCard({
                 >
                   <AgentIcon agentName={agent.name} className="size-4" />
                   <span className="min-w-0 flex-1 font-medium">{agent.name}</span>
-                  {AGENT_HINT_NAMES.has(agent.name) ? <CircleHelp className="size-3.5 text-amber-500" /> : null}
                 </button>
+                {issue ? (
+                  <div className="relative shrink-0">
+                    <button
+                      type="button"
+                      onClick={(event) => {
+                        event.stopPropagation()
+                        setOpenIssueAgent((current) => (current === agent.name ? '' : agent.name))
+                      }}
+                      className="inline-flex size-7 items-center justify-center rounded-lg text-amber-500 hover:bg-amber-500/10"
+                      aria-label={`查看 ${agent.name} 异常原因`}
+                    >
+                      <CircleHelp className="size-3.5" />
+                    </button>
+                    {openIssueAgent === agent.name ? (
+                      <div className="absolute right-0 top-[calc(100%+6px)] z-40 w-[220px] rounded-xl border border-border bg-popover p-2.5 text-[12px] leading-5 text-popover-foreground shadow-[0_12px_30px_rgba(15,23,42,0.14)]">
+                        {issue}
+                      </div>
+                    ) : null}
+                  </div>
+                ) : null}
                 <button
                   type="button"
                   onClick={() => {
                     setPanelAgent(agent.name)
                     onSelectAgent(agent.name)
                     setExpandedSection('models')
+                    setOpenIssueAgent('')
                   }}
                   className={cn(
                     'inline-flex size-7 shrink-0 items-center justify-center rounded-lg',
@@ -2454,6 +2497,19 @@ function agentModelLabel(model: { id: string; name?: string }) {
 
 function normalizeFastMode(value: string | undefined) {
   return value === 'on' ? 'on' : 'off'
+}
+
+function agentIssueReason(agent: AgentStatus) {
+  if (typeof agent.error === 'string' && agent.error.trim()) {
+    return agent.error.trim()
+  }
+  if (!agent.installed) {
+    return `未检测到本机 ${agent.name} CLI。`
+  }
+  if (!agent.available) {
+    return `${agent.name} 当前不可用。`
+  }
+  return ''
 }
 
 function getSnapshotItems(task: TaskView, stage: StageView) {

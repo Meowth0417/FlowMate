@@ -16,6 +16,7 @@ export interface AgentStatus {
   name: string
   installed: boolean
   available: boolean
+  error?: string
   current_model_id?: string
   default_model_id?: string
   default_effort?: string
@@ -63,10 +64,16 @@ function probeCopilot(): AgentStatus {
   ])
 
   const models = buildModels(modelIds, currentModel, defaultModel, describeCopilotModel, COPILOT_EFFORTS)
+  const error = !installed
+    ? '未检测到本机 Copilot CLI，请先安装并确保 `copilot` 命令可用。'
+    : models.length === 0
+      ? '已检测到 Copilot CLI，但未探测到可用模型。'
+      : undefined
   return {
     name: 'copilot',
     installed,
     available: installed && models.length > 0,
+    error,
     current_model_id: currentModel || undefined,
     default_model_id: defaultModel || currentModel || undefined,
     default_effort: defaultEffort || undefined,
@@ -104,11 +111,17 @@ function probeCodex(): AgentStatus {
   const defaultFastService = serviceTier === 'flex' || serviceTier === 'fast' ? 'on' : 'off'
   const modelIds = uniqueStrings([currentModel, ...configIds, ...binaryIds])
   const models = buildModels(modelIds, currentModel, currentModel, describeCodexModel, CODEX_EFFORTS)
+  const error = !installed
+    ? '未检测到本机 Codex CLI，请先安装并确保 `codex` 命令可用。'
+    : models.length === 0
+      ? '已检测到 Codex CLI，但未探测到可用模型。'
+      : undefined
 
   return {
     name: 'codex',
     installed,
     available: installed && models.length > 0,
+    error,
     current_model_id: currentModel || undefined,
     default_model_id: currentModel || undefined,
     default_effort: defaultEffort || undefined,
@@ -143,11 +156,17 @@ function probeClaude(): AgentStatus {
     ...binaryIds,
   ])
   const models = buildModels(modelIds, currentModel, defaultModel, describeClaudeModel, CLAUDE_EFFORTS)
+  const error = !installed
+    ? '未检测到本机 Claude CLI，请先安装并确保 `claude` 命令可用。'
+    : models.length === 0
+      ? '已检测到 Claude CLI，但未探测到可用模型。'
+      : undefined
 
   return {
     name: 'claude',
     installed,
     available: installed && models.length > 0,
+    error,
     current_model_id: currentModel || undefined,
     default_model_id: defaultModel || undefined,
     default_effort: defaultEffort || undefined,
@@ -172,11 +191,17 @@ function probeGemini(): AgentStatus {
     ...extractMatches(readTextFile(bundlePath), /gemini-\d(?:\.\d+)?-(?:pro|flash)(?:-preview)?/g),
   ])
   const models = buildModels(modelIds, currentModel, defaultModel, describeGeminiModel)
+  const error = !installed
+    ? '未检测到本机 Gemini CLI，请先安装并确保 `gemini` 命令可用。'
+    : models.length === 0
+      ? '已检测到 Gemini CLI，但未探测到可用模型。'
+      : undefined
 
   return {
     name: 'gemini',
     installed,
     available: installed && models.length > 0,
+    error,
     current_model_id: currentModel || undefined,
     default_model_id: defaultModel || undefined,
     models,
