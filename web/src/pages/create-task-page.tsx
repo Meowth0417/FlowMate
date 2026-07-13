@@ -16,6 +16,7 @@ interface FormState {
   pmId: string
   frontendDevId: string
   backendDevId: string
+  testerId: string
 }
 
 const initialForm: FormState = {
@@ -25,6 +26,7 @@ const initialForm: FormState = {
   pmId: '',
   frontendDevId: '',
   backendDevId: '',
+  testerId: '',
 }
 
 export function CreateTaskPage() {
@@ -37,6 +39,7 @@ export function CreateTaskPage() {
 
   const pmOptions = users.filter((user) => user.role === 'pm')
   const devOptions = users.filter((user) => user.role === 'dev')
+  const testerOptions = users.filter((user) => user.role === 'tester')
 
   // Preselect sensible defaults once users load.
   useEffect(() => {
@@ -46,6 +49,7 @@ export function CreateTaskPage() {
       pmId: prev.pmId || pmOptions[0]?.id || '',
       frontendDevId: prev.frontendDevId || devOptions[0]?.id || '',
       backendDevId: prev.backendDevId || devOptions[1]?.id || devOptions[0]?.id || '',
+      testerId: prev.testerId || testerOptions[0]?.id || '',
     }))
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [users, currentUser])
@@ -79,6 +83,9 @@ export function CreateTaskPage() {
     if (!form.backendDevId) {
       nextErrors.backendDevId = '请选择后端开发'
     }
+    if (!form.testerId) {
+      nextErrors.testerId = '请选择测试负责人'
+    }
 
     setErrors(nextErrors)
     return Object.keys(nextErrors).length === 0
@@ -98,6 +105,7 @@ export function CreateTaskPage() {
         pmId: form.pmId,
         frontendDevId: form.frontendDevId,
         backendDevId: form.backendDevId,
+        testerId: form.testerId,
       })
       navigate('/')
     } catch (requestError) {
@@ -184,6 +192,14 @@ export function CreateTaskPage() {
                     options={devOptions}
                     placeholder="选择后端开发"
                     onChange={(value) => updateField('backendDevId', value)}
+                  />
+                </Field>
+                <Field label="测试负责人" error={errors.testerId}>
+                  <UserSelect
+                    value={form.testerId}
+                    options={testerOptions}
+                    placeholder="选择测试负责人"
+                    onChange={(value) => updateField('testerId', value)}
                   />
                 </Field>
               </div>

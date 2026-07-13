@@ -1,5 +1,6 @@
 import type {
   AgentStatus,
+  BugTarget,
   Branch,
   CreateTaskInput,
   LocalDirsResponse,
@@ -125,6 +126,26 @@ export async function reviewBranch(
   levels: string[],
 ): Promise<TaskView> {
   const payload = await post<{ task: TaskView }>(`/tasks/${taskId}/review/${branch}`, { action, levels })
+  return payload.task
+}
+
+export async function passTesting(taskId: string): Promise<TaskView> {
+  const payload = await post<{ task: TaskView }>(`/tasks/${taskId}/testing/pass`)
+  return payload.task
+}
+
+export async function reportTestingBug(taskId: string, target: BugTarget, detail: string): Promise<TaskView> {
+  const payload = await post<{ task: TaskView }>(`/tasks/${taskId}/testing/bugs`, { target, detail })
+  return payload.task
+}
+
+export async function markTestingBugFixed(taskId: string, bugId: string): Promise<TaskView> {
+  const payload = await post<{ task: TaskView }>(`/tasks/${taskId}/testing/bugs/${bugId}/fix`)
+  return payload.task
+}
+
+export async function closeTestingBug(taskId: string, bugId: string): Promise<TaskView> {
+  const payload = await post<{ task: TaskView }>(`/tasks/${taskId}/testing/bugs/${bugId}/close`)
   return payload.task
 }
 

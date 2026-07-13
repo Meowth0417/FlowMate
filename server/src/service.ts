@@ -5,7 +5,7 @@ import { basename, dirname, isAbsolute, resolve } from 'node:path'
 import type { DatabaseSync } from 'node:sqlite'
 import { listDetectedAgents, type AgentStatus } from './agent-probe.js'
 import { createDatabase, withTransaction } from './db.js'
-import { seedIfEmpty } from './seed.js'
+import { ensureMockUsers, seedIfEmpty } from './seed.js'
 import { generateExecution, type ProcessEvent } from './executor.js'
 import {
   STAGE_DEFINITIONS,
@@ -20,6 +20,28 @@ import {
   type User,
 } from './domain.js'
 
+export interface VerificationRecordView {
+  id: string
+  result: 'pass' | 'reject'
+  reason: string
+  operatorId: string
+  createdAt: string
+}
+
+export interface TestingBugView {
+  id: string
+  seq: number
+  target: 'frontend' | 'backend' | 'both'
+  detail: string
+  status: 'open' | 'fixed' | 'closed'
+  reporterId: string
+  frontendFixed: boolean
+  backendFixed: boolean
+  closedBy: string | null
+  createdAt: string
+  updatedAt: string
+}
+
 export interface StageView {
   key: StageKey
   branch: Branch
@@ -32,6 +54,8 @@ export interface StageView {
   pendingNote: string
   updatedAt: string
   permission: { execute: boolean; confirm: boolean; supplement: boolean }
+  verificationHistory: VerificationRecordView[]
+  testingBugs: TestingBugView[]
 }
 
 export interface ClarificationView {
@@ -72,6 +96,7 @@ export interface TaskView {
   pmId: string
   frontendDevId: string
   backendDevId: string
+  testerId: string
   frontendRepo: RepoBinding | null
   backendRepo: RepoBinding | null
   createdAt: string
@@ -103,6 +128,7 @@ interface TaskRow {
   pm_id: string
   frontend_dev_id: string
   backend_dev_id: string
+  tester_id: string
   frontend_repo: string
   backend_repo: string
   created_at: string
@@ -131,6 +157,7 @@ function toOwners(row: TaskRow) {
     pmId: row.pm_id,
     frontendDevId: row.frontend_dev_id,
     backendDevId: row.backend_dev_id,
+    testerId: row.tester_id,
   }
 }
 
@@ -185,9 +212,14 @@ export class WorkflowService {
 
   constructor() {
     this.db = createDatabase()
+    ensureMockUsers(this.db)
     seedIfEmpty(this.db)
+    this.normalizeTesterAssignments()
+    this.normalizeStageLayout()
     this.resetEphemeralRunningStages()
     this.normalizeLegacyDevelopmentReview()
+    this.normalizeLegacyDeliveryToTesting()
+    this.refreshTestingDerivedData()
   }
 
   private resetEphemeralRunningStages() {
@@ -217,6 +249,99 @@ export class WorkflowService {
           .run(now, row.task_id, row.branch)
       }
     })
+  }
+
+  private normalizeTesterAssignments() {
+    const defaultTester = this.db
+      .prepare("SELECT id FROM users WHERE role = 'tester' ORDER BY id ASC LIMIT 1")
+      .get() as { id: string } | undefined
+    if (!defaultTester) {
+      return
+    }
+    this.db.prepare("UPDATE tasks SET tester_id = ? WHERE tester_id = ''").run(defaultTester.id)
+  }
+
+  private normalizeStageLayout() {
+    const now = nowIso()
+    const stageOrder = new Map<string, number>()
+    let order = 0
+    for (const def of STAGE_DEFINITIONS) {
+      for (const branch of def.branches) {
+        stageOrder.set(`${def.key}:${branch}`, order)
+        order += 1
+      }
+    }
+
+    const tasks = this.db.prepare('SELECT id FROM tasks').all() as unknown as Array<{ id: string }>
+    withTransaction(this.db, () => {
+      for (const task of tasks) {
+        const existing = this.listStageRows(task.id)
+        const rowMap = new Map(existing.map((row) => [`${row.stage_key}:${row.branch}`, row] as const))
+        for (const def of STAGE_DEFINITIONS) {
+          for (const branch of def.branches) {
+            const compositeKey = `${def.key}:${branch}` as `${string}:${string}`
+            const stage = rowMap.get(compositeKey)
+            if (stage) {
+              this.db
+                .prepare('UPDATE task_stages SET stage_order = ? WHERE task_id = ? AND stage_key = ? AND branch = ?')
+                .run(stageOrder.get(compositeKey) ?? 0, task.id, def.key, branch)
+              continue
+            }
+            this.db
+              .prepare(
+                `INSERT INTO task_stages (
+                  task_id, stage_key, branch, stage_order, status, run_count, extra_prompt, summary, artifact_json, pending_note, active_run_id, updated_at
+                ) VALUES (?, ?, ?, ?, ?, 0, '', '', '', '', NULL, ?)`,
+              )
+              .run(task.id, def.key, branch, stageOrder.get(compositeKey) ?? 0, this.initialMigratedStageStatus(task.id, def.key, branch), now)
+          }
+        }
+      }
+    })
+  }
+
+  private initialMigratedStageStatus(taskId: string, key: StageKey, branch: Branch) {
+    if (key !== 'testing') {
+      return key === 'requirement' ? 'pending' : 'blocked'
+    }
+    const delivery = this.db
+      .prepare("SELECT status FROM task_stages WHERE task_id = ? AND stage_key = 'delivery' AND branch = 'shared'")
+      .get(taskId) as { status: string } | undefined
+    if (delivery && (delivery.status === 'pending' || delivery.status === 'passed')) {
+      return 'passed'
+    }
+    const feReview = this.getStageRow(taskId, 'review', 'frontend')
+    const beReview = this.getStageRow(taskId, 'review', 'backend')
+    return feReview.status === 'passed' && beReview.status === 'passed' ? 'pending' : 'blocked'
+  }
+
+  private normalizeLegacyDeliveryToTesting() {
+    const now = nowIso()
+    withTransaction(this.db, () => {
+      const rows = this.db
+        .prepare("SELECT task_id, status FROM task_stages WHERE stage_key = 'delivery' AND branch = 'shared'")
+        .all() as unknown as Array<{ task_id: string; status: string }>
+
+      for (const row of rows) {
+        const testing = this.getStageRow(row.task_id, 'testing', 'shared')
+        if (testing.status !== 'blocked' && testing.status !== 'pending' && testing.status !== 'passed') {
+          continue
+        }
+        if (row.status === 'pending' || row.status === 'passed') {
+          this.db
+            .prepare("UPDATE task_stages SET status = 'passed', updated_at = ? WHERE task_id = ? AND stage_key = 'testing' AND branch = 'shared'")
+            .run(now, row.task_id)
+        }
+      }
+    })
+  }
+
+  private refreshTestingDerivedData() {
+    const tasks = this.db.prepare('SELECT id FROM tasks').all() as unknown as Array<{ id: string }>
+    for (const task of tasks) {
+      this.refreshTestingStageArtifact(task.id)
+      this.refreshDevelopmentBugNotes(task.id)
+    }
   }
 
   listUsers(): User[] {
@@ -332,10 +457,67 @@ export class WorkflowService {
     const permRoles = permRolesForUser(viewer, owners)
     this.tickRunningStages(row.id)
     const stageRows = this.listStageRows(row.id)
+    const verificationRows = this.db
+      .prepare('SELECT * FROM verifications WHERE task_id = ? ORDER BY created_at ASC, rowid ASC')
+      .all(row.id) as unknown as {
+      id: string
+      branch: string
+      result: string
+      reason: string
+      operator_id: string
+      created_at: string
+    }[]
+    const testingBugRows = this.db
+      .prepare(
+        "SELECT * FROM testing_bugs WHERE task_id = ? ORDER BY CASE status WHEN 'open' THEN 0 WHEN 'fixed' THEN 1 ELSE 2 END ASC, seq DESC",
+      )
+      .all(row.id) as unknown as Array<{
+      id: string
+      seq: number
+      target: 'frontend' | 'backend' | 'both'
+      detail: string
+      status: 'open' | 'fixed' | 'closed'
+      reporter_id: string
+      frontend_fixed_by: string
+      frontend_fixed_at: string | null
+      backend_fixed_by: string
+      backend_fixed_at: string | null
+      closed_by: string | null
+      created_at: string
+      updated_at: string
+    }>
     const stages: StageView[] = stageRows.map((stage) => {
       const key = stage.stage_key as StageKey
       const branch = stage.branch as Branch
       const perm = permissionFor(permRoles, key, branch)
+      const verificationHistory: VerificationRecordView[] =
+        key === 'verification'
+          ? verificationRows
+              .filter((v) => v.branch === branch)
+              .map((v) => ({
+                id: v.id,
+                result: v.result as 'pass' | 'reject',
+                reason: v.reason,
+                operatorId: v.operator_id,
+                createdAt: v.created_at,
+              }))
+          : []
+      const testingBugs: TestingBugView[] =
+        key === 'testing'
+          ? testingBugRows.map((bug) => ({
+              id: bug.id,
+              seq: bug.seq,
+              target: bug.target,
+              detail: bug.detail,
+              status: bug.status,
+              reporterId: bug.reporter_id,
+              frontendFixed: Boolean(bug.frontend_fixed_at),
+              backendFixed: Boolean(bug.backend_fixed_at),
+              closedBy: bug.closed_by,
+              createdAt: bug.created_at,
+              updatedAt: bug.updated_at,
+            }))
+          : []
       return {
         key,
         branch,
@@ -348,6 +530,8 @@ export class WorkflowService {
         pendingNote: stage.pending_note,
         updatedAt: stage.updated_at,
         permission: perm,
+        verificationHistory,
+        testingBugs,
       }
     })
 
@@ -405,6 +589,7 @@ export class WorkflowService {
       pmId: row.pm_id,
       frontendDevId: row.frontend_dev_id,
       backendDevId: row.backend_dev_id,
+      testerId: row.tester_id,
       frontendRepo: parseRepoField(row.frontend_repo),
       backendRepo: parseRepoField(row.backend_repo),
       createdAt: row.created_at,
@@ -452,11 +637,16 @@ export class WorkflowService {
       pmId: string
       frontendDevId: string
       backendDevId: string
+      testerId: string
     },
     creator: User,
   ): TaskView {
     if (creator.role === 'observer') {
       throw new Error('观察者不可创建任务')
+    }
+    const tester = this.getUser(input.testerId)
+    if (tester.role !== 'tester') {
+      throw new Error('测试负责人必须是测试角色用户')
     }
     const id = `t-${crypto.randomUUID().slice(0, 8)}`
     const now = nowIso()
@@ -465,8 +655,8 @@ export class WorkflowService {
         .prepare(
           `INSERT INTO tasks (
             id, title, description, state, creator_id, req_owner_id, pm_id, frontend_dev_id, backend_dev_id,
-            frontend_repo, backend_repo, created_at, updated_at
-          ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+            tester_id, frontend_repo, backend_repo, created_at, updated_at
+          ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
         )
         .run(
           id,
@@ -478,6 +668,7 @@ export class WorkflowService {
           input.pmId,
           input.frontendDevId,
           input.backendDevId,
+          input.testerId,
           '',
           '',
           now,
@@ -833,6 +1024,251 @@ export class WorkflowService {
       .run('pending', note, nowIso(), taskId, 'development', branch)
   }
 
+  private listTestingBugRows(taskId: string) {
+    return this.db
+      .prepare('SELECT * FROM testing_bugs WHERE task_id = ? ORDER BY seq ASC')
+      .all(taskId) as unknown as Array<{
+      id: string
+      task_id: string
+      seq: number
+      target: 'frontend' | 'backend' | 'both'
+      detail: string
+      status: 'open' | 'fixed' | 'closed'
+      reporter_id: string
+      frontend_fixed_by: string
+      frontend_fixed_at: string | null
+      backend_fixed_by: string
+      backend_fixed_at: string | null
+      closed_by: string | null
+      closed_at: string | null
+      created_at: string
+      updated_at: string
+    }>
+  }
+
+  private unresolvedTestingBugs(taskId: string) {
+    return this.listTestingBugRows(taskId).filter((bug) => bug.status !== 'closed')
+  }
+
+  private branchBugs(taskId: string, branch: Extract<Branch, 'frontend' | 'backend'>) {
+    return this.unresolvedTestingBugs(taskId).filter((bug) => bug.target === branch || bug.target === 'both')
+  }
+
+  private composeTestingBugNote(taskId: string, branch: Extract<Branch, 'frontend' | 'backend'>) {
+    const bugs = this.branchBugs(taskId, branch)
+    if (!bugs.length) {
+      return ''
+    }
+    return `测试阶段待修复问题：\n${bugs.map((bug) => `${bug.seq}. [${testingBugTargetLabel(bug.target)} · ${testingBugStatusLabel(bug.status)}] ${bug.detail}`).join('\n')}`
+  }
+
+  private refreshDevelopmentBugNotes(taskId: string) {
+    for (const branch of ['frontend', 'backend'] as const) {
+      const note = this.composeTestingBugNote(taskId, branch)
+      this.db
+        .prepare('UPDATE task_stages SET pending_note = ?, updated_at = ? WHERE task_id = ? AND stage_key = ? AND branch = ?')
+        .run(note, nowIso(), taskId, 'development', branch)
+    }
+  }
+
+  private refreshTestingStageArtifact(taskId: string) {
+    const bugs = this.listTestingBugRows(taskId).map((bug) => ({
+      id: bug.id,
+      seq: bug.seq,
+      target: bug.target,
+      detail: bug.detail,
+      status: bug.status,
+      reporterId: bug.reporter_id,
+      frontendFixed: Boolean(bug.frontend_fixed_at),
+      backendFixed: Boolean(bug.backend_fixed_at),
+      closedBy: bug.closed_by,
+      createdAt: bug.created_at,
+      updatedAt: bug.updated_at,
+    }))
+    const openCount = bugs.filter((bug) => bug.status === 'open').length
+    const fixedCount = bugs.filter((bug) => bug.status === 'fixed').length
+    const closedCount = bugs.filter((bug) => bug.status === 'closed').length
+    const unresolved = openCount + fixedCount
+    const summary =
+      bugs.length > 0 ? `Bug ${bugs.length} 条（待修复 ${openCount} / 待回归 ${fixedCount} / 已关闭 ${closedCount}）` : '测试阶段暂无 Bug'
+    const pendingNote =
+      unresolved > 0 ? `当前有 ${unresolved} 条未关闭 Bug，修复后需重新走对应分支自测与审查。` : bugs.length ? '全部 Bug 已关闭，可执行测试通过。' : ''
+    this.db
+      .prepare('UPDATE task_stages SET summary = ?, artifact_json = ?, pending_note = ?, updated_at = ? WHERE task_id = ? AND stage_key = ? AND branch = ?')
+      .run(summary, JSON.stringify({ bugs }), pendingNote, nowIso(), taskId, 'testing', 'shared')
+  }
+
+  private maybeOpenTesting(taskId: string) {
+    const fe = this.getStageRow(taskId, 'review', 'frontend')
+    const be = this.getStageRow(taskId, 'review', 'backend')
+    if (fe.status !== 'passed' || be.status !== 'passed') {
+      return
+    }
+    const testing = this.getStageRow(taskId, 'testing', 'shared')
+    if (testing.status === 'passed') {
+      return
+    }
+    this.setStageStatus(taskId, 'testing', 'shared', 'pending')
+    this.refreshTestingStageArtifact(taskId)
+    this.addTimeline(taskId, 'stage', '可进入测试', '前后端审查均已通过', '', 'testing', 'shared')
+  }
+
+  passTesting(taskId: string, actor: User): TaskView {
+    const task = this.getTaskRow(taskId)
+    const stage = this.getStageRow(taskId, 'testing', 'shared')
+    if (actor.id !== task.tester_id) {
+      throw new Error('仅任务测试负责人可判定测试通过')
+    }
+    if (stage.status !== 'pending') {
+      throw new Error('测试阶段当前不可操作')
+    }
+    if (this.unresolvedTestingBugs(taskId).length > 0) {
+      throw new Error('仍有未关闭 Bug，不可测试通过')
+    }
+    withTransaction(this.db, () => {
+      this.setStageStatus(taskId, 'testing', 'shared', 'passed')
+      this.setStageStatus(taskId, 'delivery', 'shared', 'pending')
+      this.addTimeline(taskId, 'tested', '测试通过', '所有 Bug 已关闭，进入交付沉淀', actor.id, 'testing', 'shared')
+      this.addTimeline(taskId, 'stage', '可进入交付沉淀', '测试阶段已通过', '', 'delivery', 'shared')
+      this.touchTask(taskId)
+    })
+    return this.getTaskView(taskId, actor)
+  }
+
+  reportTestingBug(
+    taskId: string,
+    target: 'frontend' | 'backend' | 'both',
+    detail: string,
+    actor: User,
+  ): TaskView {
+    if (target !== 'frontend' && target !== 'backend' && target !== 'both') {
+      throw new Error('无效的 Bug 归属')
+    }
+    const task = this.getTaskRow(taskId)
+    if (!isRelatedUser(actor, toOwners(task))) {
+      throw new Error('仅任务相关用户可在测试阶段提交 Bug')
+    }
+    const testing = this.getStageRow(taskId, 'testing', 'shared')
+    if (testing.status === 'passed') {
+      throw new Error('测试已通过，不可继续提交 Bug')
+    }
+    const bugCount = this.listTestingBugRows(taskId).length
+    if (testing.status !== 'pending' && !(testing.status === 'blocked' && bugCount > 0)) {
+      throw new Error('当前不在测试阶段，不可提交 Bug')
+    }
+    if (!detail.trim()) {
+      throw new Error('Bug 描述不能为空')
+    }
+    withTransaction(this.db, () => {
+      const current = this.db
+        .prepare('SELECT COALESCE(MAX(seq), 0) as maxSeq FROM testing_bugs WHERE task_id = ?')
+        .get(taskId) as { maxSeq: number }
+      const now = nowIso()
+      this.db
+        .prepare(
+          `INSERT INTO testing_bugs (
+            id, task_id, seq, target, detail, status, reporter_id, created_at, updated_at
+          ) VALUES (?, ?, ?, ?, ?, 'open', ?, ?, ?)`,
+        )
+        .run(crypto.randomUUID(), taskId, current.maxSeq + 1, target, detail.trim(), actor.id, now, now)
+
+      this.setStageStatus(taskId, 'testing', 'shared', 'blocked')
+      for (const branch of bugTargetBranches(target)) {
+        this.setDevelopmentPending(taskId, branch, this.composeTestingBugNote(taskId, branch))
+        this.setStageStatus(taskId, 'verification', branch, 'blocked')
+        this.setStageStatus(taskId, 'review', branch, 'blocked')
+      }
+      this.refreshDevelopmentBugNotes(taskId)
+      this.refreshTestingStageArtifact(taskId)
+      this.addTimeline(taskId, 'bug', `提交${testingBugTargetLabel(target)} Bug`, detail.trim(), actor.id, 'testing', 'shared')
+      this.touchTask(taskId)
+    })
+    return this.getTaskView(taskId, actor)
+  }
+
+  markTestingBugFixed(taskId: string, bugId: string, actor: User): TaskView {
+    const task = this.getTaskRow(taskId)
+    const bug = this.listTestingBugRows(taskId).find((item) => item.id === bugId)
+    if (!bug) {
+      throw new Error('Bug 不存在')
+    }
+    if (bug.status === 'closed') {
+      throw new Error('已关闭 Bug 不可再次标记修复')
+    }
+
+    const isFrontendDev = actor.id === task.frontend_dev_id
+    const isBackendDev = actor.id === task.backend_dev_id
+    const now = nowIso()
+
+    withTransaction(this.db, () => {
+      if (bug.target === 'frontend') {
+        if (!isFrontendDev) {
+          throw new Error('仅前端开发可标记该 Bug 已修复')
+        }
+        this.db
+          .prepare('UPDATE testing_bugs SET status = ?, frontend_fixed_by = ?, frontend_fixed_at = ?, updated_at = ? WHERE id = ?')
+          .run('fixed', actor.id, now, now, bugId)
+      } else if (bug.target === 'backend') {
+        if (!isBackendDev) {
+          throw new Error('仅后端开发可标记该 Bug 已修复')
+        }
+        this.db
+          .prepare('UPDATE testing_bugs SET status = ?, backend_fixed_by = ?, backend_fixed_at = ?, updated_at = ? WHERE id = ?')
+          .run('fixed', actor.id, now, now, bugId)
+      } else {
+        if (isFrontendDev && !bug.frontend_fixed_at) {
+          this.db
+            .prepare('UPDATE testing_bugs SET frontend_fixed_by = ?, frontend_fixed_at = ?, updated_at = ? WHERE id = ?')
+            .run(actor.id, now, now, bugId)
+        } else if (isBackendDev && !bug.backend_fixed_at) {
+          this.db
+            .prepare('UPDATE testing_bugs SET backend_fixed_by = ?, backend_fixed_at = ?, updated_at = ? WHERE id = ?')
+            .run(actor.id, now, now, bugId)
+        } else {
+          throw new Error('仅相关开发可标记该 Bug 已修复')
+        }
+        const next = this.listTestingBugRows(taskId).find((item) => item.id === bugId)
+        if (next?.frontend_fixed_at && next.backend_fixed_at) {
+          this.db.prepare('UPDATE testing_bugs SET status = ?, updated_at = ? WHERE id = ?').run('fixed', nowIso(), bugId)
+        }
+      }
+      this.refreshDevelopmentBugNotes(taskId)
+      this.refreshTestingStageArtifact(taskId)
+      this.addTimeline(taskId, 'bug-fixed', `Bug #${bug.seq} 已修复`, bug.detail, actor.id, 'testing', 'shared')
+      this.touchTask(taskId)
+    })
+    return this.getTaskView(taskId, actor)
+  }
+
+  closeTestingBug(taskId: string, bugId: string, actor: User): TaskView {
+    const task = this.getTaskRow(taskId)
+    const stage = this.getStageRow(taskId, 'testing', 'shared')
+    const bug = this.listTestingBugRows(taskId).find((item) => item.id === bugId)
+    if (actor.id !== task.tester_id) {
+      throw new Error('仅任务测试负责人可关闭 Bug')
+    }
+    if (!bug) {
+      throw new Error('Bug 不存在')
+    }
+    if (stage.status !== 'pending') {
+      throw new Error('测试阶段未重新打开，不可关闭 Bug')
+    }
+    if (bug.status !== 'fixed') {
+      throw new Error('仅已修复 Bug 可关闭')
+    }
+    withTransaction(this.db, () => {
+      const now = nowIso()
+      this.db
+        .prepare('UPDATE testing_bugs SET status = ?, closed_by = ?, closed_at = ?, updated_at = ? WHERE id = ?')
+        .run('closed', actor.id, now, now, bugId)
+      this.refreshDevelopmentBugNotes(taskId)
+      this.refreshTestingStageArtifact(taskId)
+      this.addTimeline(taskId, 'bug-closed', `Bug #${bug.seq} 回归通过`, bug.detail, actor.id, 'testing', 'shared')
+      this.touchTask(taskId)
+    })
+    return this.getTaskView(taskId, actor)
+  }
+
   // Code review: pass; or reflow selected risk levels back to development.
   review(
     taskId: string,
@@ -849,7 +1285,7 @@ export class WorkflowService {
       if (action === 'pass') {
         this.setStageStatus(taskId, 'review', branch, 'passed')
         this.addTimeline(taskId, 'reviewed', `${stageDisplayName('review', branch)} 通过`, '', actor.id, 'review', branch)
-        this.maybeOpenDelivery(taskId)
+        this.maybeOpenTesting(taskId)
       } else {
         if (!levels.length) {
           throw new Error('回流需选择至少一个风险分级')
@@ -862,15 +1298,6 @@ export class WorkflowService {
       this.touchTask(taskId)
     })
     return this.getTaskView(taskId, actor)
-  }
-
-  private maybeOpenDelivery(taskId: string) {
-    const fe = this.getStageRow(taskId, 'review', 'frontend')
-    const be = this.getStageRow(taskId, 'review', 'backend')
-    if (fe.status === 'passed' && be.status === 'passed') {
-      this.setStageStatus(taskId, 'delivery', 'shared', 'pending')
-      this.addTimeline(taskId, 'stage', '可进入交付沉淀', '前后端审查均已通过', '', 'delivery', 'shared')
-    }
   }
 
   // Delivery: pass completes the task; reject rolls back to a target stage.
@@ -909,6 +1336,7 @@ export class WorkflowService {
         this.setDevelopmentPending(taskId, target, `交付驳回：${reason}`)
         this.setStageStatus(taskId, 'verification', target, 'blocked')
         this.setStageStatus(taskId, 'review', target, 'blocked')
+        this.setStageStatus(taskId, 'testing', 'shared', 'blocked')
       } else {
         throw new Error('无效的回退目标')
       }
@@ -924,6 +1352,7 @@ export class WorkflowService {
         this.setStageStatus(taskId, key, branch, 'blocked')
       }
     }
+    this.setStageStatus(taskId, 'testing', 'shared', 'blocked')
   }
 
   // Supplement requirement after it has passed: append note, choose impact, optionally re-enter design.
@@ -987,6 +1416,22 @@ function levelLabel(level: string): string {
   return level
 }
 
+function bugTargetBranches(target: 'frontend' | 'backend' | 'both'): Array<'frontend' | 'backend'> {
+  return target === 'both' ? ['frontend', 'backend'] : [target]
+}
+
+function testingBugTargetLabel(target: 'frontend' | 'backend' | 'both') {
+  if (target === 'frontend') return '前端'
+  if (target === 'backend') return '后端'
+  return '前后端'
+}
+
+function testingBugStatusLabel(status: 'open' | 'fixed' | 'closed') {
+  if (status === 'open') return '待修复'
+  if (status === 'fixed') return '待回归'
+  return '已关闭'
+}
+
 function detectGitBranch(repoPath: string): string | null {
   try {
     const branch = execFileSync('git', ['-C', repoPath, 'branch', '--show-current'], {
@@ -1007,5 +1452,9 @@ function deriveStateLabel(state: string, stages: StageView[]): string {
   if (running) return `${running.name}处理中`
   const review = stages.find((s) => s.status === 'review')
   if (review) return `等待${review.name}确认`
+  const testing = stages.find((s) => s.key === 'testing' && s.status === 'pending')
+  if (testing) return '等待测试'
+  const delivery = stages.find((s) => s.key === 'delivery' && s.status === 'pending')
+  if (delivery) return '等待交付确认'
   return '进行中'
 }

@@ -1,9 +1,11 @@
 // Canonical frontend types mirroring the FlowMate V3 backend (server/src/service.ts).
 
-export type SystemRole = 'pm' | 'dev' | 'observer'
+export type SystemRole = 'pm' | 'dev' | 'tester' | 'observer'
 export type Branch = 'shared' | 'frontend' | 'backend'
-export type StageKey = 'requirement' | 'design' | 'development' | 'verification' | 'review' | 'delivery'
+export type StageKey = 'requirement' | 'design' | 'development' | 'verification' | 'review' | 'testing' | 'delivery'
 export type StageStatus = 'blocked' | 'pending' | 'running' | 'review' | 'passed'
+export type BugTarget = 'frontend' | 'backend' | 'both'
+export type BugStatus = 'open' | 'fixed' | 'closed'
 
 export interface User {
   id: string
@@ -60,6 +62,28 @@ export interface AgentStatus {
   models?: AgentModelInfo[]
 }
 
+export interface VerificationRecordView {
+  id: string
+  result: 'pass' | 'reject'
+  reason: string
+  operatorId: string
+  createdAt: string
+}
+
+export interface TestingBugView {
+  id: string
+  seq: number
+  target: BugTarget
+  detail: string
+  status: BugStatus
+  reporterId: string
+  frontendFixed: boolean
+  backendFixed: boolean
+  closedBy: string | null
+  createdAt: string
+  updatedAt: string
+}
+
 export interface StageView {
   key: StageKey
   branch: Branch
@@ -72,6 +96,8 @@ export interface StageView {
   pendingNote: string
   updatedAt: string
   permission: Permission
+  verificationHistory: VerificationRecordView[]
+  testingBugs: TestingBugView[]
 }
 
 export interface ClarificationView {
@@ -105,6 +131,7 @@ export interface TaskView {
   pmId: string
   frontendDevId: string
   backendDevId: string
+  testerId: string
   frontendRepo: RepoBinding | null
   backendRepo: RepoBinding | null
   createdAt: string
@@ -136,10 +163,12 @@ export interface CreateTaskInput {
   pmId: string
   frontendDevId: string
   backendDevId: string
+  testerId: string
 }
 
 export const ROLE_LABELS: Record<SystemRole, string> = {
   pm: '产品经理',
   dev: '开发',
+  tester: '测试',
   observer: '观察者',
 }

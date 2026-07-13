@@ -4,11 +4,15 @@ import {
   answerClarification as answerClarificationRequest,
   bindRepo as bindRepoRequest,
   cancelTask as cancelTaskRequest,
+  closeTestingBug as closeTestingBugRequest,
   createTask as createTaskRequest,
   deliver as deliverRequest,
   executeStage as executeStageRequest,
   fetchTasks,
   fetchUsers,
+  markTestingBugFixed as markTestingBugFixedRequest,
+  passTesting as passTestingRequest,
+  reportTestingBug as reportTestingBugRequest,
   reviewBranch as reviewBranchRequest,
   rollbackDelivery as rollbackDeliveryRequest,
   saveExtraPrompt as saveExtraPromptRequest,
@@ -18,7 +22,7 @@ import {
   verifyBranch as verifyBranchRequest,
 } from '@/lib/api'
 import { WorkspaceStoreContext, type WorkspaceStoreValue } from '@/state/workspace-store-context'
-import type { Branch, CreateTaskInput, StageKey, TaskView, User } from '@/lib/types'
+import type { Branch, BugTarget, CreateTaskInput, StageKey, TaskView, User } from '@/lib/types'
 
 const STORAGE_KEY = 'flowmate.currentUserId'
 
@@ -157,6 +161,19 @@ export function WorkspaceStoreProvider({ children }: { children: ReactNode }) {
     () => wrap((taskId: string, branch: Branch, action: 'pass' | 'reflow', levels: string[]) => reviewBranchRequest(taskId, branch, action, levels)),
     [wrap],
   )
+  const passTesting = useMemo(() => wrap((taskId: string) => passTestingRequest(taskId)), [wrap])
+  const reportTestingBug = useMemo(
+    () => wrap((taskId: string, target: BugTarget, detail: string) => reportTestingBugRequest(taskId, target, detail)),
+    [wrap],
+  )
+  const markTestingBugFixed = useMemo(
+    () => wrap((taskId: string, bugId: string) => markTestingBugFixedRequest(taskId, bugId)),
+    [wrap],
+  )
+  const closeTestingBug = useMemo(
+    () => wrap((taskId: string, bugId: string) => closeTestingBugRequest(taskId, bugId)),
+    [wrap],
+  )
   const deliver = useMemo(() => wrap((taskId: string) => deliverRequest(taskId)), [wrap])
   const rollbackDelivery = useMemo(
     () => wrap((taskId: string, target: string, reason: string) => rollbackDeliveryRequest(taskId, target, reason)),
@@ -196,6 +213,10 @@ export function WorkspaceStoreProvider({ children }: { children: ReactNode }) {
       answerClarification,
       verifyBranch,
       reviewBranch,
+      passTesting,
+      reportTestingBug,
+      markTestingBugFixed,
+      closeTestingBug,
       deliver,
       rollbackDelivery,
       supplementRequirement,
@@ -224,6 +245,10 @@ export function WorkspaceStoreProvider({ children }: { children: ReactNode }) {
       answerClarification,
       verifyBranch,
       reviewBranch,
+      passTesting,
+      reportTestingBug,
+      markTestingBugFixed,
+      closeTestingBug,
       deliver,
       rollbackDelivery,
       supplementRequirement,

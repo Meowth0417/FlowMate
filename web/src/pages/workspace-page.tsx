@@ -23,6 +23,7 @@ import { NavLink } from 'react-router-dom'
 import { fetchAgents, fetchLocalDirs, fetchProcess } from '@/lib/api'
 import {
   type AgentStatus,
+  type BugTarget,
   type LocalDirItem,
   ROLE_LABELS,
   type Branch,
@@ -33,6 +34,7 @@ import {
   type StageStatus,
   type StageView,
   type TaskView,
+  type TestingBugView,
   type TimelineView,
 } from '@/lib/types'
 import { cn } from '@/lib/utils'
@@ -48,6 +50,7 @@ const stageIcons: Record<StageKey, ComponentType<{ className?: string }>> = {
   development: Code2,
   verification: ClipboardCheck,
   review: Bot,
+  testing: CircleHelp,
   delivery: Sparkles,
 }
 
@@ -70,6 +73,8 @@ type ActionType =
   | 'verify-reject'
   | 'review-pass'
   | 'review-reflow'
+  | 'testing-pass'
+  | 'report-bug'
   | 'deliver'
   | 'rollback'
   | 'supplement-requirement'
@@ -130,6 +135,10 @@ export function WorkspacePage() {
     answerClarification,
     verifyBranch,
     reviewBranch,
+    passTesting,
+    reportTestingBug,
+    markTestingBugFixed,
+    closeTestingBug,
     deliver,
     rollbackDelivery,
     supplementRequirement,
@@ -147,6 +156,8 @@ export function WorkspacePage() {
   const [dialogReflowLevels, setDialogReflowLevels] = useState<ReviewLevel[]>(['high'])
   const [actionSubmitting, setActionSubmitting] = useState(false)
   const [actionError, setActionError] = useState<string | null>(null)
+  const [bugActionPendingId, setBugActionPendingId] = useState('')
+  const [bugActionError, setBugActionError] = useState<string | null>(null)
   const [executeSubmitting, setExecuteSubmitting] = useState(false)
   const [agents, setAgents] = useState<AgentStatus[]>([])
   const [repoSaving, setRepoSaving] = useState(false)
@@ -473,6 +484,36 @@ export function WorkspacePage() {
     }
   }
 
+  async function handleMarkTestingBugFixed(bugId: string) {
+    if (!selectedTask) {
+      return
+    }
+    try {
+      setBugActionPendingId(`fix:${bugId}`)
+      setBugActionError(null)
+      await markTestingBugFixed(selectedTask.id, bugId)
+    } catch (requestError) {
+      setBugActionError((requestError as Error).message)
+    } finally {
+      setBugActionPendingId('')
+    }
+  }
+
+  async function handleCloseTestingBug(bugId: string) {
+    if (!selectedTask) {
+      return
+    }
+    try {
+      setBugActionPendingId(`close:${bugId}`)
+      setBugActionError(null)
+      await closeTestingBug(selectedTask.id, bugId)
+    } catch (requestError) {
+      setBugActionError((requestError as Error).message)
+    } finally {
+      setBugActionPendingId('')
+    }
+  }
+
   async function handleConfirmAction() {
     if (!dialog || !selectedTask || !selectedStage) {
       return
@@ -498,6 +539,13 @@ export function WorkspacePage() {
           throw new Error('请至少选择一个风险级别')
         }
         await reviewBranch(selectedTask.id, selectedStage.branch, 'reflow', dialogReflowLevels)
+      } else if (dialog.type === 'testing-pass') {
+        await passTesting(selectedTask.id)
+      } else if (dialog.type === 'report-bug') {
+        if (!dialogNote.trim()) {
+          throw new Error('请填写 Bug 描述')
+        }
+        await reportTestingBug(selectedTask.id, dialogImpact as BugTarget, dialogNote.trim())
       } else if (dialog.type === 'deliver') {
         await deliver(selectedTask.id)
       } else if (dialog.type === 'rollback') {
@@ -827,7 +875,16 @@ export function WorkspacePage() {
 
                   {showProcessCard ? <ProcessTimelineCard events={processEvents} running={processRunning} /> : null}
 
-                  <StageArtifactView task={selectedTask} stage={selectedStage} />
+                  <StageArtifactView
+                    task={selectedTask}
+                    stage={selectedStage}
+                    users={users}
+                    currentUserId={currentUser?.id ?? ''}
+                    bugActionPendingId={bugActionPendingId}
+                    bugActionError={bugActionError}
+                    onMarkTestingBugFixed={handleMarkTestingBugFixed}
+                    onCloseTestingBug={handleCloseTestingBug}
+                  />
                 </div>
               </div>
             </section>
@@ -1668,7 +1725,25 @@ function ClarificationPanel({
   )
 }
 
-function StageArtifactView({ task, stage }: { task: TaskView; stage: StageView }) {
+function StageArtifactView({
+  task,
+  stage,
+  users,
+  currentUserId,
+  bugActionPendingId,
+  bugActionError,
+  onMarkTestingBugFixed,
+  onCloseTestingBug,
+}: {
+  task: TaskView
+  stage: StageView
+  users: { id: string; name: string }[]
+  currentUserId: string
+  bugActionPendingId: string
+  bugActionError: string | null
+  onMarkTestingBugFixed: (bugId: string) => void
+  onCloseTestingBug: (bugId: string) => void
+}) {
   if (stage.key === 'requirement') {
     const artifact = requirementArtifact(stage.artifact)
 
@@ -1845,6 +1920,8 @@ function StageArtifactView({ task, stage }: { task: TaskView; stage: StageView }
   }
 
   if (stage.key === 'verification') {
+    const rejections = stage.verificationHistory.filter((record) => record.result === 'reject')
+    const rejectionsLatestFirst = [...rejections].reverse()
     return (
       <Card className="rounded-[18px]">
         <CardHeader>
@@ -1855,8 +1932,114 @@ function StageArtifactView({ task, stage }: { task: TaskView; stage: StageView }
           <SnapshotLine label="阶段状态" value={stageBadge(task, stage).label} />
           <SnapshotLine label="分支" value={branchLabel(stage.branch)} />
           <p className="text-sm text-muted-foreground">{stage.pendingNote || '通过后进入代码审查，驳回时需填写原因。'}</p>
+          <div className="space-y-2 pt-1">
+            <p className="text-xs font-medium text-muted-foreground">驳回记录（{rejectionsLatestFirst.length}）</p>
+            {rejectionsLatestFirst.length ? (
+              rejectionsLatestFirst.map((record, index) => (
+                <div key={record.id} className="rounded-[14px] border border-border bg-muted/30 p-3">
+                  <div className="flex items-start justify-between gap-3">
+                    <div className="min-w-0 flex-1">
+                      <div className="flex items-center gap-2">
+                        <Badge variant="destructive">第 {rejectionsLatestFirst.length - index} 次驳回</Badge>
+                      </div>
+                      <p className="mt-2 text-sm text-muted-foreground">{record.reason}</p>
+                    </div>
+                    <div className="shrink-0 text-right text-xs text-muted-foreground">
+                      <p>{userName(record.operatorId, users)}</p>
+                      <p className="mt-1">{formatDateTime(record.createdAt)}</p>
+                    </div>
+                  </div>
+                </div>
+              ))
+            ) : (
+              <EmptyHint>暂无驳回记录。</EmptyHint>
+            )}
+          </div>
         </CardContent>
       </Card>
+    )
+  }
+
+  if (stage.key === 'testing') {
+    return (
+      <div className="space-y-3">
+        <Card className="rounded-[18px]">
+          <CardHeader>
+            <CardTitle>测试阶段</CardTitle>
+            <CardDescription>测试环境联调、提 Bug、回归与测试结论统一在这里完成。</CardDescription>
+          </CardHeader>
+          <CardContent className="space-y-3">
+            <SnapshotLine label="阶段状态" value={stageBadge(task, stage).label} />
+            <SnapshotLine label="测试负责人" value={userName(task.testerId, users)} />
+            <SnapshotLine
+              label="未关闭 Bug"
+              value={`${stage.testingBugs.filter((bug) => bug.status !== 'closed').length} 条`}
+            />
+            <p className="text-sm text-muted-foreground">{stage.pendingNote || '当前暂无测试说明。'}</p>
+          </CardContent>
+        </Card>
+
+        <Card className="rounded-[18px]">
+          <CardHeader>
+            <CardTitle>Bug 列表</CardTitle>
+            <CardDescription>保留全部历史记录，未关闭项优先展示。</CardDescription>
+          </CardHeader>
+          <CardContent className="space-y-3">
+            {stage.testingBugs.length ? (
+              stage.testingBugs.map((bug) => (
+                <div key={bug.id} className="rounded-[18px] border border-border bg-muted/20 p-4">
+                  <div className="flex items-start justify-between gap-3">
+                    <div className="min-w-0 flex-1">
+                      <div className="flex flex-wrap items-center gap-2">
+                        <Badge variant={bug.status === 'open' ? 'destructive' : bug.status === 'fixed' ? 'warning' : 'success'}>
+                          Bug #{bug.seq}
+                        </Badge>
+                        <Badge variant="outline">{testingBugTargetLabel(bug.target)}</Badge>
+                        <Badge variant={bug.status === 'open' ? 'destructive' : bug.status === 'fixed' ? 'warning' : 'success'}>
+                          {testingBugStatusLabel(bug.status)}
+                        </Badge>
+                        {bug.target === 'both' ? (
+                          <Badge variant="secondary">
+                            FE {bug.frontendFixed ? '已修' : '未修'} / BE {bug.backendFixed ? '已修' : '未修'}
+                          </Badge>
+                        ) : null}
+                      </div>
+                      <p className="mt-3 text-sm leading-6 text-muted-foreground">{bug.detail}</p>
+                      <p className="mt-2 text-xs text-muted-foreground">
+                        提交人：{userName(bug.reporterId, users)} · {formatDateTime(bug.createdAt)}
+                      </p>
+                    </div>
+                    <div className="flex shrink-0 flex-col items-end gap-2">
+                      {canMarkTestingBugFixed(task, bug, currentUserId) ? (
+                        <Button
+                          variant="outline"
+                          className="h-8 rounded-lg px-3 text-xs"
+                          disabled={bugActionPendingId === `fix:${bug.id}`}
+                          onClick={() => onMarkTestingBugFixed(bug.id)}
+                        >
+                          标记已修复
+                        </Button>
+                      ) : null}
+                      {canCloseTestingBug(task, stage, bug, currentUserId) ? (
+                        <Button
+                          className="h-8 rounded-lg px-3 text-xs"
+                          disabled={bugActionPendingId === `close:${bug.id}`}
+                          onClick={() => onCloseTestingBug(bug.id)}
+                        >
+                          回归关闭
+                        </Button>
+                      ) : null}
+                    </div>
+                  </div>
+                </div>
+              ))
+            ) : (
+              <EmptyHint>测试阶段暂无 Bug，回归通过后可直接测试通过。</EmptyHint>
+            )}
+            {bugActionError ? <p className="text-sm text-destructive">{bugActionError}</p> : null}
+          </CardContent>
+        </Card>
+      </div>
     )
   }
 
@@ -1864,7 +2047,7 @@ function StageArtifactView({ task, stage }: { task: TaskView; stage: StageView }
     <Card className="rounded-[18px]">
       <CardHeader>
         <CardTitle>交付沉淀</CardTitle>
-        <CardDescription>前后端代码审查均通过后，进入最终交付与沉淀。</CardDescription>
+        <CardDescription>测试通过后，进入最终交付与沉淀。</CardDescription>
       </CardHeader>
       <CardContent className="space-y-3">
         <SnapshotLine label="前端仓库" value={formatRepoBinding(task.frontendRepo)} />
@@ -2023,6 +2206,21 @@ function ActionDialog({
             </div>
           ) : null}
 
+          {dialog.type === 'report-bug' ? (
+            <label className="block space-y-2">
+              <span className="text-sm font-medium">Bug 归属</span>
+              <select
+                className="flex h-11 w-full rounded-lg border border-input bg-background px-4 text-sm outline-none transition-colors focus-visible:ring-2 focus-visible:ring-ring"
+                value={impact}
+                onChange={(event) => setImpact(event.target.value as Impact)}
+              >
+                <option value="frontend">前端</option>
+                <option value="backend">后端</option>
+                <option value="both">前后端</option>
+              </select>
+            </label>
+          ) : null}
+
           {config.noteLabel ? (
             <label className="block space-y-2">
               <span className="text-sm font-medium">{config.noteLabel}</span>
@@ -2179,6 +2377,14 @@ function getToolbarActions(stage: StageView | null): ToolbarAction[] {
     actions.push({ type: 'review-pass', label: '审查通过', variant: 'default', icon: Check })
   }
 
+  if (stage.key === 'testing' && stage.status !== 'passed' && stage.permission.supplement) {
+    actions.push({ type: 'report-bug', label: '提交 Bug', variant: 'destructive', icon: Plus })
+  }
+
+  if (stage.key === 'testing' && stage.status === 'pending' && stage.permission.confirm) {
+    actions.push({ type: 'testing-pass', label: '测试通过', variant: 'default', icon: Check })
+  }
+
   if (stage.key === 'delivery' && stage.status === 'pending' && stage.permission.confirm) {
     actions.push({ type: 'rollback', label: '交付驳回', variant: 'destructive', icon: RotateCcw })
     actions.push({ type: 'deliver', label: '确认交付', variant: 'default', icon: Check })
@@ -2189,6 +2395,7 @@ function getToolbarActions(stage: StageView | null): ToolbarAction[] {
 
 function isStageActionable(stage: StageView) {
   return (
+    (stage.key === 'testing' && stage.status !== 'passed' && stage.permission.supplement) ||
     (stage.status === 'pending' && (stage.permission.execute || stage.permission.confirm)) ||
     (stage.status === 'review' && stage.permission.confirm)
   )
@@ -2231,7 +2438,7 @@ function getDialogConfig(type: ActionType, stage: StageView) {
   if (type === 'review-pass') {
     return {
       title: '代码审查通过',
-      description: '前后端审查都通过后将开放交付沉淀。',
+      description: '前后端审查都通过后将开放测试阶段。',
       noteLabel: '',
       notePlaceholder: '',
       confirmLabel: '确认通过',
@@ -2246,6 +2453,28 @@ function getDialogConfig(type: ActionType, stage: StageView) {
       noteLabel: '',
       notePlaceholder: '',
       confirmLabel: '确认回流',
+      confirmVariant: 'destructive' as const,
+    }
+  }
+
+  if (type === 'testing-pass') {
+    return {
+      title: '测试通过',
+      description: '仅测试负责人可执行。通过后任务进入交付沉淀。',
+      noteLabel: '',
+      notePlaceholder: '',
+      confirmLabel: '确认通过',
+      confirmVariant: 'default' as const,
+    }
+  }
+
+  if (type === 'report-bug') {
+    return {
+      title: '提交 Bug',
+      description: '测试阶段所有相关用户都可提交 Bug，并按归属回流到对应开发分支。',
+      noteLabel: 'Bug 描述',
+      notePlaceholder: '描述复现路径、现象、预期结果和影响范围。',
+      confirmLabel: '确认提交',
       confirmVariant: 'destructive' as const,
     }
   }
@@ -2322,10 +2551,13 @@ function isStageReachable(task: TaskView, stage: StageView) {
   if (stage.key === 'review') {
     return stage.branch !== 'shared' && getStageStatus(task, 'verification', stage.branch) === 'passed'
   }
-  return (
-    getStageStatus(task, 'review', 'frontend') === 'passed' &&
-    getStageStatus(task, 'review', 'backend') === 'passed'
-  )
+  if (stage.key === 'testing') {
+    return (
+      stage.testingBugs.length > 0 ||
+      (getStageStatus(task, 'review', 'frontend') === 'passed' && getStageStatus(task, 'review', 'backend') === 'passed')
+    )
+  }
+  return getStageStatus(task, 'testing', 'shared') === 'passed'
 }
 
 function getStageStatus(task: TaskView, key: StageKey, branch: Branch) {
@@ -2345,9 +2577,9 @@ function stageKey(stage: StageView) {
 }
 
 function getDefaultStageKey(task: TaskView) {
-  const executableStage = task.stages.find((stage) => stage.status === 'pending' && stage.permission.execute)
-  if (executableStage) {
-    return stageKey(executableStage)
+  const actionableStage = task.stages.find((stage) => stage.status === 'running' || isStageActionable(stage))
+  if (actionableStage) {
+    return stageKey(actionableStage)
   }
   const requirementStage = task.stages.find((stage) => stage.key === 'requirement' && stage.branch === 'shared')
   return stageKey(requirementStage ?? task.stages[0])
@@ -2383,6 +2615,9 @@ function stageRoleLabel(task: TaskView, stage: StageView, users: { id: string; n
   if (stage.key === 'design' || stage.key === 'delivery') {
     return `创建人/负责人 · ${userName(task.reqOwnerId, users)}`
   }
+  if (stage.key === 'testing') {
+    return `测试负责人 · ${userName(task.testerId, users)}`
+  }
   if (stage.branch === 'frontend') {
     return `前端开发 · ${userName(task.frontendDevId, users)}`
   }
@@ -2397,6 +2632,38 @@ function userName(userId: string | null | undefined, users: { id: string; name: 
   return users.find((user) => user.id === userId)?.name ?? userId
 }
 
+function testingBugTargetLabel(target: BugTarget) {
+  if (target === 'frontend') return '前端'
+  if (target === 'backend') return '后端'
+  return '前后端'
+}
+
+function testingBugStatusLabel(status: TestingBugView['status']) {
+  if (status === 'open') return '待修复'
+  if (status === 'fixed') return '待回归'
+  return '已关闭'
+}
+
+function canMarkTestingBugFixed(task: TaskView, bug: TestingBugView, currentUserId: string) {
+  if (!currentUserId || bug.status === 'closed' || bug.status === 'fixed') {
+    return false
+  }
+  if (bug.target === 'frontend') {
+    return currentUserId === task.frontendDevId
+  }
+  if (bug.target === 'backend') {
+    return currentUserId === task.backendDevId
+  }
+  return (
+    (currentUserId === task.frontendDevId && !bug.frontendFixed) ||
+    (currentUserId === task.backendDevId && !bug.backendFixed)
+  )
+}
+
+function canCloseTestingBug(task: TaskView, stage: StageView, bug: TestingBugView, currentUserId: string) {
+  return stage.key === 'testing' && stage.status === 'pending' && currentUserId === task.testerId && bug.status === 'fixed'
+}
+
 function processTypeLabel(type: ProcessEvent['type']) {
   if (type === 'thought') return '思考'
   if (type === 'tool') return '工具'
@@ -2404,9 +2671,9 @@ function processTypeLabel(type: ProcessEvent['type']) {
 }
 
 function timelineBadgeVariant(kind: string): 'default' | 'secondary' | 'success' | 'warning' | 'destructive' {
-  if (kind === 'rejected' || kind === 'rollback' || kind === 'cancelled' || kind === 'reflow') return 'destructive'
-  if (kind === 'verified' || kind === 'reviewed' || kind === 'advanced' || kind === 'delivered') return 'success'
-  if (kind === 'supplement' || kind === 'clarified') return 'warning'
+  if (kind === 'rejected' || kind === 'rollback' || kind === 'cancelled' || kind === 'reflow' || kind === 'bug') return 'destructive'
+  if (kind === 'verified' || kind === 'reviewed' || kind === 'advanced' || kind === 'delivered' || kind === 'tested' || kind === 'bug-closed') return 'success'
+  if (kind === 'supplement' || kind === 'clarified' || kind === 'bug-fixed') return 'warning'
   return 'secondary'
 }
 
@@ -2424,6 +2691,10 @@ function timelineBadgeLabel(kind: string) {
     rejected: '驳回',
     reviewed: '审查',
     reflow: '回流',
+    tested: '测试',
+    bug: 'Bug',
+    'bug-fixed': '修复',
+    'bug-closed': '回归',
     delivered: '交付',
     rollback: '回退',
     supplement: '补充',
@@ -2438,6 +2709,7 @@ function stageKeyLabel(key: string) {
     development: '开发',
     verification: '功能验证',
     review: '代码审查',
+    testing: '测试',
     delivery: '交付沉淀',
   }
   return map[key] ?? key
@@ -2554,6 +2826,14 @@ function getSnapshotItems(task: TaskView, stage: StageView) {
       { label: '分支', value: branchLabel(stage.branch) },
       { label: '状态', value: stageBadge(task, stage).label },
       { label: '运行次数', value: `${stage.runCount}` },
+    ]
+  }
+
+  if (stage.key === 'testing') {
+    return [
+      { label: '未关闭 Bug', value: `${stage.testingBugs.filter((bug) => bug.status !== 'closed').length} 条` },
+      { label: '已关闭 Bug', value: `${stage.testingBugs.filter((bug) => bug.status === 'closed').length} 条` },
+      { label: '测试结论', value: stageBadge(task, stage).label },
     ]
   }
 

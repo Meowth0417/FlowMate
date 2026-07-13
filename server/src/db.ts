@@ -26,6 +26,7 @@ export function createDatabase() {
       pm_id TEXT NOT NULL,
       frontend_dev_id TEXT NOT NULL,
       backend_dev_id TEXT NOT NULL,
+      tester_id TEXT NOT NULL DEFAULT '',
       frontend_repo TEXT NOT NULL DEFAULT '',
       backend_repo TEXT NOT NULL DEFAULT '',
       created_at TEXT NOT NULL,
@@ -103,11 +104,40 @@ export function createDatabase() {
       FOREIGN KEY (task_id) REFERENCES tasks(id) ON DELETE CASCADE
     );
 
+    CREATE TABLE IF NOT EXISTS testing_bugs (
+      id TEXT PRIMARY KEY,
+      task_id TEXT NOT NULL,
+      seq INTEGER NOT NULL,
+      target TEXT NOT NULL,
+      detail TEXT NOT NULL,
+      status TEXT NOT NULL,
+      reporter_id TEXT NOT NULL,
+      frontend_fixed_by TEXT NOT NULL DEFAULT '',
+      frontend_fixed_at TEXT,
+      backend_fixed_by TEXT NOT NULL DEFAULT '',
+      backend_fixed_at TEXT,
+      closed_by TEXT,
+      closed_at TEXT,
+      created_at TEXT NOT NULL,
+      updated_at TEXT NOT NULL,
+      FOREIGN KEY (task_id) REFERENCES tasks(id) ON DELETE CASCADE
+    );
+
     CREATE INDEX IF NOT EXISTS idx_tasks_updated_at ON tasks(updated_at DESC);
     CREATE INDEX IF NOT EXISTS idx_stage_runs_task ON stage_runs(task_id, stage_key, branch, run_index DESC);
     CREATE INDEX IF NOT EXISTS idx_timeline_task ON timeline_events(task_id, created_at DESC);
+    CREATE INDEX IF NOT EXISTS idx_testing_bugs_task ON testing_bugs(task_id, seq DESC);
   `)
+  ensureColumn(database, 'tasks', 'tester_id', "TEXT NOT NULL DEFAULT ''")
   return database
+}
+
+function ensureColumn(database: DatabaseSync, table: string, column: string, definition: string) {
+  const columns = database.prepare(`PRAGMA table_info(${table})`).all() as unknown as Array<{ name: string }>
+  if (columns.some((entry) => entry.name === column)) {
+    return
+  }
+  database.exec(`ALTER TABLE ${table} ADD COLUMN ${column} ${definition}`)
 }
 
 export function withTransaction<T>(database: DatabaseSync, callback: () => T) {

@@ -9,6 +9,8 @@ export const MOCK_USERS: User[] = [
   { id: 'u-dev-2', name: '开发 · 周野', role: 'dev' },
   { id: 'u-dev-3', name: '开发 · 何棠', role: 'dev' },
   { id: 'u-dev-4', name: '开发 · 江予', role: 'dev' },
+  { id: 'u-tester-1', name: '测试 · 程澈', role: 'tester' },
+  { id: 'u-tester-2', name: '测试 · 沈夕', role: 'tester' },
   { id: 'u-ob-1', name: '观察 · 顾遥', role: 'observer' },
 ]
 
@@ -21,6 +23,7 @@ interface SeedTask {
   pmId: string
   frontendDevId: string
   backendDevId: string
+  testerId: string
   // stage_key:branch => status
   stageStatuses: Record<string, string>
   state: string
@@ -40,16 +43,13 @@ function stageInstances() {
 }
 
 export function seedIfEmpty(database: DatabaseSync) {
-  const row = database.prepare('SELECT COUNT(*) as count FROM users').get() as { count: number }
+  ensureMockUsers(database)
+  const row = database.prepare('SELECT COUNT(*) as count FROM tasks').get() as { count: number }
   if (row.count > 0) {
     return
   }
 
   withTransaction(database, () => {
-    for (const user of MOCK_USERS) {
-      database.prepare('INSERT INTO users (id, name, role) VALUES (?, ?, ?)').run(user.id, user.name, user.role)
-    }
-
     const tasks: SeedTask[] = [
       {
         id: 't-demo-1',
@@ -60,6 +60,7 @@ export function seedIfEmpty(database: DatabaseSync) {
         pmId: 'u-pm-1',
         frontendDevId: 'u-dev-2',
         backendDevId: 'u-dev-3',
+        testerId: 'u-tester-1',
         state: 'pending',
         stageStatuses: { 'requirement:shared': 'pending' },
       },
@@ -72,6 +73,7 @@ export function seedIfEmpty(database: DatabaseSync) {
         pmId: 'u-pm-2',
         frontendDevId: 'u-dev-2',
         backendDevId: 'u-dev-4',
+        testerId: 'u-tester-2',
         state: 'in_progress',
         stageStatuses: {
           'requirement:shared': 'passed',
@@ -87,6 +89,7 @@ export function seedIfEmpty(database: DatabaseSync) {
         pmId: 'u-pm-1',
         frontendDevId: 'u-dev-1',
         backendDevId: 'u-dev-3',
+        testerId: 'u-tester-1',
         state: 'in_progress',
         stageStatuses: {
           'requirement:shared': 'passed',
@@ -104,14 +107,22 @@ export function seedIfEmpty(database: DatabaseSync) {
   })
 }
 
+export function ensureMockUsers(database: DatabaseSync) {
+  withTransaction(database, () => {
+    for (const user of MOCK_USERS) {
+      database.prepare('INSERT OR IGNORE INTO users (id, name, role) VALUES (?, ?, ?)').run(user.id, user.name, user.role)
+    }
+  })
+}
+
 function insertSeedTask(database: DatabaseSync, task: SeedTask) {
   const now = nowIso()
   database
     .prepare(
       `INSERT INTO tasks (
         id, title, description, state, creator_id, req_owner_id, pm_id, frontend_dev_id, backend_dev_id,
-        frontend_repo, backend_repo, created_at, updated_at
-      ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+        tester_id, frontend_repo, backend_repo, created_at, updated_at
+      ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
     )
     .run(
       task.id,
@@ -123,6 +134,7 @@ function insertSeedTask(database: DatabaseSync, task: SeedTask) {
       task.pmId,
       task.frontendDevId,
       task.backendDevId,
+      task.testerId,
       '',
       '',
       now,

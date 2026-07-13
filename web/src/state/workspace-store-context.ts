@@ -1,5 +1,5 @@
 import { createContext, useContext } from 'react'
-import type { Branch, CreateTaskInput, StageKey, TaskView, User } from '@/lib/types'
+import type { Branch, BugTarget, StageKey, CreateTaskInput, TaskView, User } from '@/lib/types'
 
 export interface WorkspaceStoreValue {
   // Auth (mock identity, no password) ---------------------------------------
@@ -30,6 +30,10 @@ export interface WorkspaceStoreValue {
   answerClarification: (taskId: string, clarificationId: string, answer: string) => Promise<void>
   verifyBranch: (taskId: string, branch: Branch, pass: boolean, reason: string) => Promise<void>
   reviewBranch: (taskId: string, branch: Branch, action: 'pass' | 'reflow', levels: string[]) => Promise<void>
+  passTesting: (taskId: string) => Promise<void>
+  reportTestingBug: (taskId: string, target: BugTarget, detail: string) => Promise<void>
+  markTestingBugFixed: (taskId: string, bugId: string) => Promise<void>
+  closeTestingBug: (taskId: string, bugId: string) => Promise<void>
   deliver: (taskId: string) => Promise<void>
   rollbackDelivery: (taskId: string, target: string, reason: string) => Promise<void>
   supplementRequirement: (

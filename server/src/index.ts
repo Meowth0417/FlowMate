@@ -85,12 +85,13 @@ app.post('/api/tasks', async (request, reply) => {
     pmId?: string
     frontendDevId?: string
     backendDevId?: string
+    testerId?: string
   }
   if (!body?.title?.trim() || !body?.description?.trim()) {
     return reply.code(400).send({ message: '标题与描述必填' })
   }
-  if (!body.reqOwnerId || !body.pmId || !body.frontendDevId || !body.backendDevId) {
-    return reply.code(400).send({ message: '需求负责人、产品经理、前端开发、后端开发必选' })
+  if (!body.reqOwnerId || !body.pmId || !body.frontendDevId || !body.backendDevId || !body.testerId) {
+    return reply.code(400).send({ message: '需求负责人、产品经理、前后端开发、测试负责人必选' })
   }
   try {
     return {
@@ -102,6 +103,7 @@ app.post('/api/tasks', async (request, reply) => {
           pmId: body.pmId,
           frontendDevId: body.frontendDevId,
           backendDevId: body.backendDevId,
+          testerId: body.testerId,
         },
         currentUser(request),
       ),
@@ -215,6 +217,46 @@ app.post('/api/tasks/:taskId/review/:branch', async (request, reply) => {
     return {
       task: service.review(taskId, branch, body?.action ?? 'pass', body?.levels ?? [], currentUser(request)),
     }
+  } catch (error) {
+    return handleError(reply, error)
+  }
+})
+
+app.post('/api/tasks/:taskId/testing/pass', async (request, reply) => {
+  const { taskId } = request.params as { taskId: string }
+  try {
+    return { task: service.passTesting(taskId, currentUser(request)) }
+  } catch (error) {
+    return handleError(reply, error)
+  }
+})
+
+app.post('/api/tasks/:taskId/testing/bugs', async (request, reply) => {
+  const { taskId } = request.params as { taskId: string }
+  const body = request.body as { target?: 'frontend' | 'backend' | 'both'; detail?: string }
+  if (!body?.target) {
+    return reply.code(400).send({ message: 'Bug 归属必填' })
+  }
+  try {
+    return { task: service.reportTestingBug(taskId, body.target, body?.detail ?? '', currentUser(request)) }
+  } catch (error) {
+    return handleError(reply, error)
+  }
+})
+
+app.post('/api/tasks/:taskId/testing/bugs/:bugId/fix', async (request, reply) => {
+  const { taskId, bugId } = request.params as { taskId: string; bugId: string }
+  try {
+    return { task: service.markTestingBugFixed(taskId, bugId, currentUser(request)) }
+  } catch (error) {
+    return handleError(reply, error)
+  }
+})
+
+app.post('/api/tasks/:taskId/testing/bugs/:bugId/close', async (request, reply) => {
+  const { taskId, bugId } = request.params as { taskId: string; bugId: string }
+  try {
+    return { task: service.closeTestingBug(taskId, bugId, currentUser(request)) }
   } catch (error) {
     return handleError(reply, error)
   }

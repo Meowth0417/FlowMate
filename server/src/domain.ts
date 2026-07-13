@@ -1,10 +1,10 @@
 // FlowMate V3 domain model: users, roles, stages, branches, permissions.
 
-export type SystemRole = 'pm' | 'dev' | 'observer'
+export type SystemRole = 'pm' | 'dev' | 'tester' | 'observer'
 
 export type Branch = 'shared' | 'frontend' | 'backend'
 
-export type StageKey = 'requirement' | 'design' | 'development' | 'verification' | 'review' | 'delivery'
+export type StageKey = 'requirement' | 'design' | 'development' | 'verification' | 'review' | 'testing' | 'delivery'
 
 // Per-stage-instance status.
 export type StageStatus =
@@ -40,7 +40,7 @@ export interface User {
 }
 
 // Task-level owner fields.
-export type OwnerField = 'creator' | 'reqOwner' | 'pm' | 'frontendDev' | 'backendDev'
+export type OwnerField = 'creator' | 'reqOwner' | 'pm' | 'frontendDev' | 'backendDev' | 'tester'
 
 export interface StageDefinition {
   key: StageKey
@@ -56,6 +56,7 @@ export const STAGE_DEFINITIONS: StageDefinition[] = [
   { key: 'development', name: '开发', branches: ['frontend', 'backend'], agentExecuted: true, agentName: 'coding-agent' },
   { key: 'verification', name: '功能验证', branches: ['frontend', 'backend'], agentExecuted: false, agentName: '' },
   { key: 'review', name: '代码审查', branches: ['frontend', 'backend'], agentExecuted: true, agentName: 'review-agent' },
+  { key: 'testing', name: '测试', branches: ['shared'], agentExecuted: false, agentName: '' },
   { key: 'delivery', name: '交付沉淀', branches: ['shared'], agentExecuted: false, agentName: '' },
 ]
 
@@ -82,9 +83,9 @@ export function stageDisplayName(key: StageKey, branch: Branch): string {
 // ---- Permission matrix (PRD 6.2) ----
 // Columns keyed by (stageKey, branch). Front/back dev & verification share one column per branch.
 
-type PermRoleKey = 'pm' | 'frontendDev' | 'backendDev' | 'owner' | 'observer'
+type PermRoleKey = 'pm' | 'frontendDev' | 'backendDev' | 'tester' | 'owner' | 'observer'
 
-// Matrix rows: requirement, design, fe-dev/verify, be-dev/verify, fe-review, be-review, delivery.
+// Matrix rows: requirement, design, fe-dev/verify, be-dev/verify, fe-review, be-review, testing, delivery.
 const MATRIX: Record<PermRoleKey, Record<string, string>> = {
   pm: {
     requirement: '111',
@@ -95,6 +96,7 @@ const MATRIX: Record<PermRoleKey, Record<string, string>> = {
     'verification:backend': '000',
     'review:frontend': '000',
     'review:backend': '000',
+    testing: '001',
     delivery: '000',
   },
   frontendDev: {
@@ -106,6 +108,7 @@ const MATRIX: Record<PermRoleKey, Record<string, string>> = {
     'verification:backend': '000',
     'review:frontend': '111',
     'review:backend': '000',
+    testing: '001',
     delivery: '000',
   },
   backendDev: {
@@ -117,6 +120,19 @@ const MATRIX: Record<PermRoleKey, Record<string, string>> = {
     'verification:backend': '111',
     'review:frontend': '000',
     'review:backend': '111',
+    testing: '001',
+    delivery: '000',
+  },
+  tester: {
+    requirement: '000',
+    design: '000',
+    'development:frontend': '000',
+    'verification:frontend': '000',
+    'development:backend': '000',
+    'verification:backend': '000',
+    'review:frontend': '000',
+    'review:backend': '000',
+    testing: '011',
     delivery: '000',
   },
   owner: {
@@ -129,6 +145,7 @@ const MATRIX: Record<PermRoleKey, Record<string, string>> = {
     'verification:backend': '000',
     'review:frontend': '111',
     'review:backend': '111',
+    testing: '001',
     delivery: '111',
   },
   observer: {
@@ -140,12 +157,13 @@ const MATRIX: Record<PermRoleKey, Record<string, string>> = {
     'verification:backend': '000',
     'review:frontend': '000',
     'review:backend': '000',
+    testing: '000',
     delivery: '000',
   },
 }
 
 function matrixColumnKey(key: StageKey, branch: Branch): string {
-  if (key === 'requirement' || key === 'design' || key === 'delivery') {
+  if (key === 'requirement' || key === 'design' || key === 'testing' || key === 'delivery') {
     return key
   }
   return `${key}:${branch}`
@@ -179,6 +197,7 @@ export interface TaskOwners {
   pmId: string
   frontendDevId: string
   backendDevId: string
+  testerId: string
 }
 
 // Which permission-matrix rows a user occupies on a given task.
@@ -199,6 +218,9 @@ export function permRolesForUser(user: User, owners: TaskOwners): PermRoleKey[] 
   if (user.id === owners.backendDevId) {
     roles.add('backendDev')
   }
+  if (user.id === owners.testerId) {
+    roles.add('tester')
+  }
   return [...roles]
 }
 
@@ -208,7 +230,8 @@ export function isRelatedUser(user: User, owners: TaskOwners): boolean {
     user.id === owners.reqOwnerId ||
     user.id === owners.pmId ||
     user.id === owners.frontendDevId ||
-    user.id === owners.backendDevId
+    user.id === owners.backendDevId ||
+    user.id === owners.testerId
   )
 }
 
