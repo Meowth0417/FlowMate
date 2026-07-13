@@ -1,0 +1,235 @@
+import { useCallback, useEffect, useMemo, useState, type ReactNode } from 'react'
+import {
+  advanceStage as advanceStageRequest,
+  answerClarification as answerClarificationRequest,
+  bindRepo as bindRepoRequest,
+  cancelTask as cancelTaskRequest,
+  createTask as createTaskRequest,
+  deliver as deliverRequest,
+  executeStage as executeStageRequest,
+  fetchTasks,
+  fetchUsers,
+  reviewBranch as reviewBranchRequest,
+  rollbackDelivery as rollbackDeliveryRequest,
+  saveExtraPrompt as saveExtraPromptRequest,
+  setApiUser,
+  supplementDesign as supplementDesignRequest,
+  supplementRequirement as supplementRequirementRequest,
+  verifyBranch as verifyBranchRequest,
+} from '@/lib/api'
+import { WorkspaceStoreContext, type WorkspaceStoreValue } from '@/state/workspace-store-context'
+import type { Branch, CreateTaskInput, StageKey, TaskView, User } from '@/lib/types'
+
+const STORAGE_KEY = 'flowmate.currentUserId'
+
+export function WorkspaceStoreProvider({ children }: { children: ReactNode }) {
+  const [users, setUsers] = useState<User[]>([])
+  const [currentUserId, setCurrentUserId] = useState<string>(() => localStorage.getItem(STORAGE_KEY) ?? '')
+  const [authLoading, setAuthLoading] = useState(true)
+  const [authError, setAuthError] = useState<string | null>(null)
+
+  const [tasks, setTasks] = useState<TaskView[]>([])
+  const [loading, setLoading] = useState(false)
+  const [error, setError] = useState<string | null>(null)
+  const [selectedTaskId, setSelectedTaskId] = useState('')
+
+  // Keep the API client's identity in sync so every request carries X-User-Id.
+  useEffect(() => {
+    setApiUser(currentUserId)
+  }, [currentUserId])
+
+  const refreshUsers = useCallback(async () => {
+    setAuthLoading(true)
+    try {
+      const nextUsers = await fetchUsers()
+      setUsers(nextUsers)
+      setAuthError(null)
+    } catch (requestError) {
+      setUsers([])
+      setAuthError((requestError as Error).message)
+    } finally {
+      setAuthLoading(false)
+    }
+  }, [])
+
+  useEffect(() => {
+    void refreshUsers()
+  }, [refreshUsers])
+
+  const currentUser = useMemo(
+    () => users.find((user) => user.id === currentUserId) ?? null,
+    [users, currentUserId],
+  )
+
+  const selectedTask = useMemo(
+    () => tasks.find((task) => task.id === selectedTaskId) ?? tasks[0] ?? null,
+    [selectedTaskId, tasks],
+  )
+
+  const mergeTask = useCallback((updatedTask: TaskView) => {
+    setTasks((prev) => {
+      if (!prev.some((task) => task.id === updatedTask.id)) {
+        return [updatedTask, ...prev]
+      }
+      return prev.map((task) => (task.id === updatedTask.id ? updatedTask : task))
+    })
+    setSelectedTaskId(updatedTask.id)
+  }, [])
+
+  const refreshTasks = useCallback(async () => {
+    if (!currentUserId) {
+      setTasks([])
+      return
+    }
+    setLoading(true)
+    try {
+      const nextTasks = await fetchTasks()
+      setTasks(nextTasks)
+      setSelectedTaskId((current) => (nextTasks.some((t) => t.id === current) ? current : nextTasks[0]?.id ?? ''))
+      setError(null)
+    } catch (requestError) {
+      setError((requestError as Error).message)
+    } finally {
+      setLoading(false)
+    }
+  }, [currentUserId])
+
+  useEffect(() => {
+    void refreshTasks()
+  }, [refreshTasks])
+
+  const login = useCallback((userId: string) => {
+    localStorage.setItem(STORAGE_KEY, userId)
+    setApiUser(userId)
+    setCurrentUserId(userId)
+  }, [])
+
+  const logout = useCallback(() => {
+    localStorage.removeItem(STORAGE_KEY)
+    setApiUser('')
+    setCurrentUserId('')
+    setTasks([])
+    setSelectedTaskId('')
+  }, [])
+
+  const createTask = useCallback(
+    async (input: CreateTaskInput) => {
+      const task = await createTaskRequest(input)
+      mergeTask(task)
+      return task
+    },
+    [mergeTask],
+  )
+
+  // Each mutation returns the updated TaskView; merge it into the list.
+  const wrap = useCallback(
+    <A extends unknown[]>(fn: (...args: A) => Promise<TaskView>) =>
+      async (...args: A) => {
+        const task = await fn(...args)
+        mergeTask(task)
+      },
+    [mergeTask],
+  )
+
+  const cancelTask = useMemo(() => wrap(cancelTaskRequest), [wrap])
+  const saveExtraPrompt = useMemo(
+    () => wrap((taskId: string, key: StageKey, branch: Branch, prompt: string) => saveExtraPromptRequest(taskId, key, branch, prompt)),
+    [wrap],
+  )
+  const executeStage = useMemo(
+    () => wrap((taskId: string, key: StageKey, branch: Branch, prompt?: string) => executeStageRequest(taskId, key, branch, prompt)),
+    [wrap],
+  )
+  const advanceStage = useMemo(() => wrap((taskId: string, key: StageKey) => advanceStageRequest(taskId, key)), [wrap])
+  const bindRepo = useMemo(
+    () => wrap((taskId: string, branch: Branch, path: string) => bindRepoRequest(taskId, branch, path)),
+    [wrap],
+  )
+  const answerClarification = useMemo(
+    () => wrap((taskId: string, clarificationId: string, answer: string) => answerClarificationRequest(taskId, clarificationId, answer)),
+    [wrap],
+  )
+  const verifyBranch = useMemo(
+    () => wrap((taskId: string, branch: Branch, pass: boolean, reason: string) => verifyBranchRequest(taskId, branch, pass, reason)),
+    [wrap],
+  )
+  const reviewBranch = useMemo(
+    () => wrap((taskId: string, branch: Branch, action: 'pass' | 'reflow', levels: string[]) => reviewBranchRequest(taskId, branch, action, levels)),
+    [wrap],
+  )
+  const deliver = useMemo(() => wrap((taskId: string) => deliverRequest(taskId)), [wrap])
+  const rollbackDelivery = useMemo(
+    () => wrap((taskId: string, target: string, reason: string) => rollbackDeliveryRequest(taskId, target, reason)),
+    [wrap],
+  )
+  const supplementRequirement = useMemo(
+    () =>
+      wrap((taskId: string, note: string, impact: 'frontend' | 'backend' | 'both', reenterDesign: boolean) =>
+        supplementRequirementRequest(taskId, note, impact, reenterDesign),
+      ),
+    [wrap],
+  )
+  const supplementDesign = useMemo(() => wrap((taskId: string, note: string) => supplementDesignRequest(taskId, note)), [wrap])
+
+  const value = useMemo<WorkspaceStoreValue>(
+    () => ({
+      users,
+      currentUser,
+      authLoading,
+      authError,
+      login,
+      logout,
+      refreshUsers,
+      tasks,
+      loading,
+      error,
+      selectedTaskId,
+      selectedTask,
+      setSelectedTaskId,
+      refreshTasks,
+      createTask,
+      cancelTask,
+      saveExtraPrompt,
+      executeStage,
+      advanceStage,
+      bindRepo,
+      answerClarification,
+      verifyBranch,
+      reviewBranch,
+      deliver,
+      rollbackDelivery,
+      supplementRequirement,
+      supplementDesign,
+    }),
+    [
+      users,
+      currentUser,
+      authLoading,
+      authError,
+      login,
+      logout,
+      refreshUsers,
+      tasks,
+      loading,
+      error,
+      selectedTaskId,
+      selectedTask,
+      refreshTasks,
+      createTask,
+      cancelTask,
+      saveExtraPrompt,
+      executeStage,
+      advanceStage,
+      bindRepo,
+      answerClarification,
+      verifyBranch,
+      reviewBranch,
+      deliver,
+      rollbackDelivery,
+      supplementRequirement,
+      supplementDesign,
+    ],
+  )
+
+  return <WorkspaceStoreContext.Provider value={value}>{children}</WorkspaceStoreContext.Provider>
+}
