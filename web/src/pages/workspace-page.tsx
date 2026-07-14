@@ -54,6 +54,77 @@ const stageIcons: Record<StageKey, ComponentType<{ className?: string }>> = {
   delivery: Sparkles,
 }
 
+function TestingBugPromptCard({
+  detail,
+  target,
+  submitting,
+  submitError,
+  onDetailChange,
+  onTargetChange,
+  onSubmit,
+}: {
+  detail: string
+  target: BugTarget
+  submitting: boolean
+  submitError: string | null
+  onDetailChange: (value: string) => void
+  onTargetChange: (value: BugTarget) => void
+  onSubmit: () => void
+}) {
+  const textareaRef = useRef<HTMLTextAreaElement | null>(null)
+
+  useEffect(() => {
+    if (!textareaRef.current) {
+      return
+    }
+    textareaRef.current.style.height = '0px'
+    textareaRef.current.style.height = `${Math.min(textareaRef.current.scrollHeight, 160)}px`
+  }, [detail])
+
+  return (
+    <div className="rounded-[18px] border border-border bg-card px-4 py-3 shadow-sm">
+      <Textarea
+        ref={textareaRef}
+        rows={3}
+        className="min-h-0 resize-none border-0 bg-transparent px-0 py-0 text-[15px] leading-7 text-foreground shadow-none focus-visible:ring-0"
+        placeholder="描述复现路径、现象、预期结果和影响范围"
+        value={detail}
+        onChange={(event) => onDetailChange(event.target.value)}
+        onInput={(event) => {
+          const target = event.currentTarget
+          target.style.height = '0px'
+          target.style.height = `${Math.min(target.scrollHeight, 160)}px`
+        }}
+      />
+      <div className="mt-3 flex flex-wrap items-center justify-between gap-3">
+        <button
+          type="button"
+          className="flex size-7 items-center justify-center rounded-full border border-border bg-muted/20 text-muted-foreground"
+          title="预留入口"
+        >
+          <Plus className="size-3.5" />
+        </button>
+        <div className="flex flex-wrap items-center gap-2">
+          <select
+            className="h-8 rounded-full border border-border bg-background px-3 text-xs outline-none transition-colors focus-visible:ring-2 focus-visible:ring-ring"
+            value={target}
+            onChange={(event) => onTargetChange(event.target.value as BugTarget)}
+          >
+            <option value="frontend">前端</option>
+            <option value="backend">后端</option>
+            <option value="both">前后端</option>
+          </select>
+          <Button className="h-8 rounded-full px-3 text-sm" variant="destructive" onClick={onSubmit} disabled={submitting}>
+            <Plus className="size-3.5" />
+            {submitting ? '提交中...' : '提交 Bug'}
+          </Button>
+        </div>
+      </div>
+      {submitError ? <p className="mt-3 text-sm text-destructive">{submitError}</p> : null}
+    </div>
+  )
+}
+
 const statusBadgeMap: Record<
   StageStatus,
   { label: string; variant: 'success' | 'warning' | 'destructive' | 'secondary' | 'default' }
@@ -130,6 +201,7 @@ export function WorkspacePage() {
     setSelectedTaskId,
     refreshTasks,
     executeStage,
+    reunderstandRequirement,
     advanceStage,
     bindRepo,
     answerClarification,
@@ -158,6 +230,10 @@ export function WorkspacePage() {
   const [actionError, setActionError] = useState<string | null>(null)
   const [bugActionPendingId, setBugActionPendingId] = useState('')
   const [bugActionError, setBugActionError] = useState<string | null>(null)
+  const [testingBugDraft, setTestingBugDraft] = useState('')
+  const [testingBugTarget, setTestingBugTarget] = useState<BugTarget>('both')
+  const [testingBugSubmitting, setTestingBugSubmitting] = useState(false)
+  const [testingBugSubmitError, setTestingBugSubmitError] = useState<string | null>(null)
   const [executeSubmitting, setExecuteSubmitting] = useState(false)
   const [agents, setAgents] = useState<AgentStatus[]>([])
   const [repoSaving, setRepoSaving] = useState(false)
@@ -193,10 +269,10 @@ export function WorkspacePage() {
     [selectedTask],
   )
 
-  const toolbarActions = useMemo(() => getToolbarActions(selectedStage), [selectedStage])
+  const toolbarActions = useMemo(() => getToolbarActions(selectedTask, selectedStage), [selectedStage, selectedTask])
   const currentThemeLabel = resolvedTheme === 'dark' ? '暗色' : '亮色'
   const sharedStages = useMemo(
-    () => selectedTask?.stages.filter((stage) => stage.branch === 'shared' && stage.key !== 'delivery') ?? [],
+    () => selectedTask?.stages.filter((stage) => stage.branch === 'shared' && stage.key !== 'testing' && stage.key !== 'delivery') ?? [],
     [selectedTask],
   )
   const frontendStages = useMemo(
@@ -205,6 +281,10 @@ export function WorkspacePage() {
   )
   const backendStages = useMemo(
     () => selectedTask?.stages.filter((stage) => stage.branch === 'backend') ?? [],
+    [selectedTask],
+  )
+  const testingStage = useMemo(
+    () => selectedTask?.stages.find((stage) => stage.branch === 'shared' && stage.key === 'testing') ?? null,
     [selectedTask],
   )
   const deliveryStage = useMemo(
@@ -256,6 +336,7 @@ export function WorkspacePage() {
   }, [agents, selectedStage, selectedTask, stageAgentEfforts, stageAgentFastModes, stageAgentModels])
   const canBindLocalRepo = Boolean(showDevelopmentRepoToolbar && !selectedRepo)
   const showProcessCard = Boolean(selectedStage?.status === 'running' && processRunning)
+  const showTestingBugPrompt = Boolean(selectedStage && canReportTestingBug(selectedStage))
 
   useEffect(() => {
     if (!currentUser) {
@@ -305,6 +386,12 @@ export function WorkspacePage() {
   useEffect(() => {
     setPromptDraft(selectedStage ? selectedStage.pendingNote || selectedStage.extraPrompt || '' : '')
   }, [selectedStage])
+
+  useEffect(() => {
+    setTestingBugDraft('')
+    setTestingBugTarget('both')
+    setTestingBugSubmitError(null)
+  }, [selectedTask?.id, selectedStageKey])
 
   useEffect(() => {
     if (!selectedTask || !selectedStage || !currentUser || !isAgentStage(selectedStage.key) || selectedStage.status !== 'running') {
@@ -416,6 +503,18 @@ export function WorkspacePage() {
     }
   }
 
+  async function handleReunderstandRequirement() {
+    if (!selectedTask || !selectedStage || selectedStage.key !== 'requirement' || selectedStage.status !== 'review') {
+      return
+    }
+    try {
+      setExecuteSubmitting(true)
+      await reunderstandRequirement(selectedTask.id)
+    } finally {
+      setExecuteSubmitting(false)
+    }
+  }
+
   async function loadLocalDirs(path?: string) {
     setRepoBrowser((current) => ({
       ...current,
@@ -511,6 +610,26 @@ export function WorkspacePage() {
       setBugActionError((requestError as Error).message)
     } finally {
       setBugActionPendingId('')
+    }
+  }
+
+  async function handleSubmitTestingBug() {
+    if (!selectedTask || !selectedStage || selectedStage.key !== 'testing') {
+      return
+    }
+    if (!testingBugDraft.trim()) {
+      setTestingBugSubmitError('请填写 Bug 描述')
+      return
+    }
+    try {
+      setTestingBugSubmitting(true)
+      setTestingBugSubmitError(null)
+      await reportTestingBug(selectedTask.id, testingBugTarget, testingBugDraft.trim())
+      setTestingBugDraft('')
+    } catch (requestError) {
+      setTestingBugSubmitError((requestError as Error).message)
+    } finally {
+      setTestingBugSubmitting(false)
     }
   }
 
@@ -690,6 +809,7 @@ export function WorkspacePage() {
                       key={stageKey(stage)}
                       task={selectedTask}
                       stage={stage}
+                      users={users}
                       selected={stageKey(stage) === stageKey(selectedStage)}
                       onSelect={() => setSelectedStageKey(stageKey(stage))}
                     />
@@ -700,6 +820,7 @@ export function WorkspacePage() {
                       title="前端"
                       task={selectedTask}
                       stages={frontendStages}
+                      users={users}
                       selectedStage={selectedStage}
                       onSelect={setSelectedStageKey}
                     />
@@ -707,16 +828,29 @@ export function WorkspacePage() {
                       title="后端"
                       task={selectedTask}
                       stages={backendStages}
+                      users={users}
                       selectedStage={selectedStage}
                       onSelect={setSelectedStageKey}
                     />
                   </div>
+
+                  {testingStage ? (
+                    <StageNavButton
+                      key={stageKey(testingStage)}
+                      task={selectedTask}
+                      stage={testingStage}
+                      users={users}
+                      selected={stageKey(testingStage) === stageKey(selectedStage)}
+                      onSelect={() => setSelectedStageKey(stageKey(testingStage))}
+                    />
+                  ) : null}
 
                   {deliveryStage ? (
                     <StageNavButton
                       key={stageKey(deliveryStage)}
                       task={selectedTask}
                       stage={deliveryStage}
+                      users={users}
                       selected={stageKey(deliveryStage) === stageKey(selectedStage)}
                       onSelect={() => setSelectedStageKey(stageKey(deliveryStage))}
                     />
@@ -777,6 +911,21 @@ export function WorkspacePage() {
                     ) : null}
 
                     <div className="ml-auto flex shrink-0 items-center gap-1.5">
+                      {selectedStage.key === 'requirement' &&
+                      selectedStage.status === 'review' &&
+                      selectedStage.permission.execute ? (
+                        <Button
+                          variant="outline"
+                          size="icon"
+                          className="size-8 rounded-md"
+                          title="重新理解"
+                          aria-label="重新理解"
+                          onClick={() => void handleReunderstandRequirement()}
+                          disabled={executeSubmitting}
+                        >
+                          <RotateCcw className="size-3.5" />
+                        </Button>
+                      ) : null}
                       {toolbarActions.map((action) => (
                         <Button
                           key={action.type}
@@ -851,6 +1000,18 @@ export function WorkspacePage() {
                       }}
                       executeSubmitting={executeSubmitting}
                       onExecute={() => void handleExecuteStage()}
+                    />
+                  ) : null}
+
+                  {selectedStage.key === 'testing' && showTestingBugPrompt ? (
+                    <TestingBugPromptCard
+                      detail={testingBugDraft}
+                      target={testingBugTarget}
+                      submitting={testingBugSubmitting}
+                      submitError={testingBugSubmitError}
+                      onDetailChange={setTestingBugDraft}
+                      onTargetChange={setTestingBugTarget}
+                      onSubmit={() => void handleSubmitTestingBug()}
                     />
                   ) : null}
 
@@ -1514,12 +1675,14 @@ function StageBranchColumn({
   title,
   task,
   stages,
+  users,
   selectedStage,
   onSelect,
 }: {
   title: string
   task: TaskView
   stages: StageView[]
+  users: { id: string; name: string }[]
   selectedStage: StageView
   onSelect: (value: string) => void
 }) {
@@ -1532,6 +1695,7 @@ function StageBranchColumn({
             key={stageKey(stage)}
             task={task}
             stage={stage}
+            users={users}
             selected={stageKey(stage) === stageKey(selectedStage)}
             compact
             onSelect={() => onSelect(stageKey(stage))}
@@ -1545,12 +1709,14 @@ function StageBranchColumn({
 function StageNavButton({
   task,
   stage,
+  users,
   selected,
   compact = false,
   onSelect,
 }: {
   task: TaskView
   stage: StageView
+  users: { id: string; name: string }[]
   selected: boolean
   compact?: boolean
   onSelect: () => void
@@ -1558,6 +1724,9 @@ function StageNavButton({
   const Icon = stageIcons[stage.key]
   const badge = stageBadge(task, stage)
   const actionable = isStageActionable(stage)
+  const reachable = isStageReachable(task, stage)
+  const splitMetaLines = stage.branch !== 'shared'
+  const ownerName = stageOwnerName(task, stage, users)
 
   if (compact) {
     return (
@@ -1568,10 +1737,10 @@ function StageNavButton({
           selected
             ? actionable
               ? 'border-warning/50 bg-warning/10 ring-1 ring-primary/20'
-              : 'border-primary/40 bg-primary/8'
+              : 'border-primary/40 bg-background'
             : actionable
               ? 'border-warning/35 bg-warning/8 hover:bg-warning/10'
-              : 'border-transparent bg-transparent hover:border-sidebar-border hover:bg-card/70',
+              : 'border-sidebar-border/70 bg-background hover:border-sidebar-border',
         )}
         onClick={onSelect}
       >
@@ -1592,9 +1761,19 @@ function StageNavButton({
 
           <p className="mt-3 text-[14px] font-semibold leading-5 text-foreground">{compactStageLabel(stage)}</p>
 
-          <div className="mt-2 text-xs text-muted-foreground">Run {stage.runCount}</div>
+          <p className="mt-1 truncate text-xs text-muted-foreground">{ownerName}</p>
 
-          <div className="mt-1 text-xs text-muted-foreground">{formatDateTime(stage.updatedAt)}</div>
+          {splitMetaLines ? (
+            <>
+              <div className="mt-2 text-xs text-muted-foreground">Run {stage.runCount}</div>
+              <div className="mt-1 text-xs text-muted-foreground">{reachable ? formatDateTime(stage.updatedAt) : '\u00A0'}</div>
+            </>
+          ) : (
+            <div className="mt-2 text-xs text-muted-foreground">
+              Run {stage.runCount}
+              {reachable ? ` · ${formatDateTime(stage.updatedAt)}` : ''}
+            </div>
+          )}
 
           <div className="mt-auto pt-1" />
         </div>
@@ -1610,10 +1789,10 @@ function StageNavButton({
         selected
           ? actionable
             ? 'border-warning/50 bg-warning/10 ring-1 ring-primary/20'
-            : 'border-primary/40 bg-primary/8'
+            : 'border-primary/40 bg-background'
           : actionable
             ? 'border-warning/35 bg-warning/8 hover:bg-warning/10'
-            : 'border-transparent bg-transparent hover:border-sidebar-border hover:bg-card/70',
+            : 'border-sidebar-border/70 bg-background hover:border-sidebar-border',
       )}
       onClick={onSelect}
     >
@@ -1631,13 +1810,14 @@ function StageNavButton({
             <p className="truncate text-sm font-medium">{stage.name}</p>
             <Badge variant={badge.variant}>{badge.label}</Badge>
           </div>
+          <p className="mt-1 truncate text-xs text-muted-foreground">{ownerName}</p>
           <p className="mt-1 flex items-center gap-2 text-xs text-muted-foreground">
             {stage.branch !== 'shared' ? <span>{branchLabel(stage.branch)}</span> : null}
             <span>Run {stage.runCount}</span>
+            {!splitMetaLines && reachable ? <span>·</span> : null}
+            {!splitMetaLines && reachable ? <span>{formatDateTime(stage.updatedAt)}</span> : null}
           </p>
-          <div className="mt-2 flex items-center justify-between text-xs text-muted-foreground">
-            <span>{formatDateTime(stage.updatedAt)}</span>
-          </div>
+          {splitMetaLines ? <p className="mt-1 text-xs text-muted-foreground">{reachable ? formatDateTime(stage.updatedAt) : '\u00A0'}</p> : null}
         </div>
       </div>
     </button>
@@ -1660,18 +1840,17 @@ function ClarificationPanel({
   return (
     <Card className="rounded-[18px]">
       <CardHeader>
-        <CardTitle>澄清问题</CardTitle>
-        <CardDescription>需求理解完成后, 由产品经理或需求负责人逐条确认。</CardDescription>
+        <CardTitle>问题澄清</CardTitle>
       </CardHeader>
-      <CardContent className="space-y-3">
+      <CardContent className="space-y-2">
         {clarifications.length ? (
           clarifications.map((clarification) => {
             const draft = drafts[clarification.id]
             const confirmed = clarification.status === 'confirmed'
 
             return (
-              <div key={clarification.id} className="rounded-[18px] border border-border bg-muted/25 p-4">
-                <div className="flex items-start justify-between gap-3">
+              <div key={clarification.id} className="rounded-[14px] border border-border bg-muted/25 p-3">
+                <div className="flex items-start justify-between gap-2">
                   <div className="min-w-0 flex-1">
                     <p className="text-sm font-medium">
                       {clarification.seq + 1}. {clarification.question}
@@ -1679,9 +1858,9 @@ function ClarificationPanel({
                     {confirmed ? (
                       <p className="mt-2 text-sm text-muted-foreground">已确认：{clarification.answer}</p>
                     ) : (
-                      <div className="mt-3 space-y-3">
+                      <div className="mt-2 space-y-2">
                         <select
-                          className="flex h-11 w-full rounded-lg border border-input bg-background px-4 text-sm outline-none transition-colors focus-visible:ring-2 focus-visible:ring-ring"
+                          className="flex h-10 w-full rounded-[10px] border border-input bg-background px-2 text-sm outline-none transition-colors focus-visible:ring-2 focus-visible:ring-ring"
                           value={draft?.option ?? ''}
                           onChange={(event) => onDraftChange(clarification.id, { option: event.target.value })}
                         >
@@ -1692,7 +1871,7 @@ function ClarificationPanel({
                           ))}
                         </select>
                         <Textarea
-                          className="min-h-[84px]"
+                          className="min-h-[20px]"
                           placeholder="如果以上选项都不合适，可填写自定义答案。"
                           value={draft?.freeform ?? ''}
                           onChange={(event) => onDraftChange(clarification.id, { freeform: event.target.value })}
@@ -1704,9 +1883,9 @@ function ClarificationPanel({
                 </div>
 
                 {!confirmed ? (
-                  <div className="mt-3 flex justify-end">
+                  <div className="mt-2.5 flex justify-end">
                     <Button
-                      className="rounded-xl"
+                      className="h-9 rounded-lg px-3.5"
                       onClick={() => onConfirm(clarification)}
                       disabled={savingId === clarification.id}
                     >
@@ -1718,7 +1897,7 @@ function ClarificationPanel({
             )
           })
         ) : (
-          <EmptyHint>当前阶段暂无澄清问题。</EmptyHint>
+          <EmptyHint>当前阶段暂无问题澄清。</EmptyHint>
         )}
       </CardContent>
     </Card>
@@ -1804,8 +1983,8 @@ function StageArtifactView({
             </CardHeader>
             <CardContent className="space-y-3">
               <SnapshotLine label="影响面" value={artifact.impactScope || '待生成'} />
-              <SnapshotLine label="已确认澄清" value={`${task.clarifications.filter((item) => item.status === 'confirmed').length} 条`} />
-              <SnapshotLine label="待确认澄清" value={`${task.clarifications.filter((item) => item.status !== 'confirmed').length} 条`} />
+              <SnapshotLine label="已确认问题澄清" value={`${task.clarifications.filter((item) => item.status === 'confirmed').length} 条`} />
+              <SnapshotLine label="待确认问题澄清" value={`${task.clarifications.filter((item) => item.status !== 'confirmed').length} 条`} />
             </CardContent>
           </Card>
         </div>
@@ -1813,7 +1992,7 @@ function StageArtifactView({
         <Card className="rounded-[24px]">
           <CardHeader>
             <CardTitle>需求文档</CardTitle>
-            <CardDescription>补充需求与澄清确认结果会持续拼接到这里。</CardDescription>
+            <CardDescription>补充需求与问题澄清确认结果会持续拼接到这里。</CardDescription>
           </CardHeader>
           <CardContent>
             <pre className="whitespace-pre-wrap text-sm leading-7 text-muted-foreground">{artifact.fullDoc || '尚未生成需求文档。'}</pre>
@@ -1837,6 +2016,7 @@ function StageArtifactView({
             <ArtifactSection title="前端设计" content={artifact.frontendDesign} />
             <ArtifactSection title="后端设计" content={artifact.backendDesign} />
             <ArtifactSection title="接口文档" content={artifact.apiDoc} />
+            <ArtifactSection title="测试用例" content={artifact.testCases} />
           </CardContent>
         </Card>
 
@@ -1920,20 +2100,34 @@ function StageArtifactView({
   }
 
   if (stage.key === 'verification') {
+    const artifact = verificationArtifact(stage.artifact)
     const rejections = stage.verificationHistory.filter((record) => record.result === 'reject')
     const rejectionsLatestFirst = [...rejections].reverse()
     return (
-      <Card className="rounded-[18px]">
-        <CardHeader>
-          <CardTitle>功能验证</CardTitle>
-          <CardDescription>该阶段由人工确认是否通过, 驳回会回流到对应开发分支。</CardDescription>
-        </CardHeader>
-        <CardContent className="space-y-3">
-          <SnapshotLine label="阶段状态" value={stageBadge(task, stage).label} />
-          <SnapshotLine label="分支" value={branchLabel(stage.branch)} />
-          <p className="text-sm text-muted-foreground">{stage.pendingNote || '通过后进入代码审查，驳回时需填写原因。'}</p>
-          <div className="space-y-2 pt-1">
-            <p className="text-xs font-medium text-muted-foreground">驳回记录（{rejectionsLatestFirst.length}）</p>
+      <div className="space-y-3">
+        <Card className="rounded-[18px]">
+          <CardHeader>
+            <CardTitle>功能验证</CardTitle>
+            <CardDescription>{artifact.summary || '该阶段由人工确认是否通过, 驳回会回流到对应开发分支。'}</CardDescription>
+          </CardHeader>
+          <CardContent className="space-y-5">
+            <div className="grid gap-3 xl:grid-cols-3">
+              <SnapshotLine label="阶段状态" value={stageBadge(task, stage).label} />
+              <SnapshotLine label="分支" value={branchLabel(stage.branch)} />
+              <SnapshotLine label="验证结果" value={artifact.verificationResult || '待验证'} />
+            </div>
+            <ArtifactSection title="关键结论" content={artifact.keyConclusions.join('\n')} />
+            <ArtifactSection title="下游输入" content={artifact.downstreamInputs.join('\n')} />
+            <ArtifactSection title="验证范围" content={artifact.verificationScope.join('\n')} />
+            <ArtifactSection title="验证依据" content={artifact.passBasis || artifact.rejectionReason || stage.pendingNote || '通过后进入代码审查，驳回时需填写原因。'} />
+          </CardContent>
+        </Card>
+
+        <Card className="rounded-[18px]">
+          <CardHeader>
+            <CardTitle>驳回记录</CardTitle>
+          </CardHeader>
+          <CardContent className="space-y-3">
             {rejectionsLatestFirst.length ? (
               rejectionsLatestFirst.map((record, index) => (
                 <div key={record.id} className="rounded-[14px] border border-border bg-muted/30 p-3">
@@ -1954,19 +2148,20 @@ function StageArtifactView({
             ) : (
               <EmptyHint>暂无驳回记录。</EmptyHint>
             )}
-          </div>
-        </CardContent>
-      </Card>
+          </CardContent>
+        </Card>
+      </div>
     )
   }
 
   if (stage.key === 'testing') {
+    const artifact = testingArtifact(stage.artifact)
     return (
       <div className="space-y-3">
         <Card className="rounded-[18px]">
           <CardHeader>
             <CardTitle>测试阶段</CardTitle>
-            <CardDescription>测试环境联调、提 Bug、回归与测试结论统一在这里完成。</CardDescription>
+            <CardDescription>{artifact.summary || '测试环境联调、提 Bug、回归与测试结论统一在这里完成。'}</CardDescription>
           </CardHeader>
           <CardContent className="space-y-3">
             <SnapshotLine label="阶段状态" value={stageBadge(task, stage).label} />
@@ -1975,7 +2170,22 @@ function StageArtifactView({
               label="未关闭 Bug"
               value={`${stage.testingBugs.filter((bug) => bug.status !== 'closed').length} 条`}
             />
-            <p className="text-sm text-muted-foreground">{stage.pendingNote || '当前暂无测试说明。'}</p>
+            <p className="text-sm text-muted-foreground">{stage.pendingNote || artifact.testConclusion || '当前暂无测试说明。'}</p>
+          </CardContent>
+        </Card>
+
+        <Card className="rounded-[18px]">
+          <CardHeader>
+            <CardTitle>测试报告</CardTitle>
+          </CardHeader>
+          <CardContent className="space-y-5">
+            <ArtifactSection title="关键结论" content={artifact.keyConclusions.join('\n')} />
+            <ArtifactSection title="下游输入" content={artifact.downstreamInputs.join('\n')} />
+            <ArtifactSection title="测试范围" content={artifact.testScope.join('\n')} />
+            <ArtifactSection title="执行结果" content={artifact.executionResult} />
+            <ArtifactSection title="Bug 汇总" content={artifact.bugSummary} />
+            <ArtifactSection title="回归结论" content={artifact.regressionConclusion} />
+            <ArtifactSection title="测试结论" content={artifact.testConclusion} />
           </CardContent>
         </Card>
 
@@ -2044,17 +2254,27 @@ function StageArtifactView({
   }
 
   return (
-    <Card className="rounded-[18px]">
-      <CardHeader>
-        <CardTitle>交付沉淀</CardTitle>
-        <CardDescription>测试通过后，进入最终交付与沉淀。</CardDescription>
-      </CardHeader>
-      <CardContent className="space-y-3">
-        <SnapshotLine label="前端仓库" value={formatRepoBinding(task.frontendRepo)} />
-        <SnapshotLine label="后端仓库" value={formatRepoBinding(task.backendRepo)} />
-        <p className="text-sm text-muted-foreground">通过后任务完成；驳回可回退到需求、设计或某个分支开发。</p>
-      </CardContent>
-    </Card>
+    (() => {
+      const artifact = deliveryArtifact(stage.artifact)
+      return (
+        <Card className="rounded-[18px]">
+          <CardHeader>
+            <CardTitle>交付沉淀</CardTitle>
+            <CardDescription>{artifact.summary || '测试通过后，进入最终交付与沉淀。'}</CardDescription>
+          </CardHeader>
+          <CardContent className="space-y-5">
+            <SnapshotLine label="前端仓库" value={formatRepoBinding(task.frontendRepo)} />
+            <SnapshotLine label="后端仓库" value={formatRepoBinding(task.backendRepo)} />
+            <ArtifactSection title="关键结论" content={artifact.keyConclusions.join('\n')} />
+            <ArtifactSection title="下游输入" content={artifact.downstreamInputs.join('\n')} />
+            <ArtifactSection title="交付清单" content={artifact.deliveryItems.join('\n')} />
+            <ArtifactSection title="上线说明" content={artifact.releaseNotes} />
+            <ArtifactSection title="回滚方案" content={artifact.rollbackPlan} />
+            <ArtifactSection title="沉淀结论" content={artifact.handoffConclusion} />
+          </CardContent>
+        </Card>
+      )
+    })()
   )
 }
 
@@ -2348,8 +2568,8 @@ function CenteredState({
   )
 }
 
-function getToolbarActions(stage: StageView | null): ToolbarAction[] {
-  if (!stage) {
+function getToolbarActions(task: TaskView | null, stage: StageView | null): ToolbarAction[] {
+  if (!task || !stage) {
     return []
   }
 
@@ -2363,7 +2583,11 @@ function getToolbarActions(stage: StageView | null): ToolbarAction[] {
     actions.push({ type: 'supplement-design', label: '补充设计', variant: 'outline', icon: Plus })
   }
 
-  if ((stage.key === 'requirement' || stage.key === 'design') && stage.status === 'review' && stage.permission.confirm) {
+  if (
+    ((stage.key === 'requirement' && !task.clarifications.some((item) => item.status !== 'confirmed')) || stage.key === 'design') &&
+    stage.status === 'review' &&
+    stage.permission.confirm
+  ) {
     actions.push({ type: 'advance', label: '通过并推进', variant: 'default', icon: ChevronRight })
   }
 
@@ -2375,10 +2599,6 @@ function getToolbarActions(stage: StageView | null): ToolbarAction[] {
   if (stage.key === 'review' && stage.status === 'review' && stage.permission.confirm) {
     actions.push({ type: 'review-reflow', label: '审查回流', variant: 'destructive', icon: RotateCcw })
     actions.push({ type: 'review-pass', label: '审查通过', variant: 'default', icon: Check })
-  }
-
-  if (stage.key === 'testing' && stage.status !== 'passed' && stage.permission.supplement) {
-    actions.push({ type: 'report-bug', label: '提交 Bug', variant: 'destructive', icon: Plus })
   }
 
   if (stage.key === 'testing' && stage.status === 'pending' && stage.permission.confirm) {
@@ -2395,9 +2615,17 @@ function getToolbarActions(stage: StageView | null): ToolbarAction[] {
 
 function isStageActionable(stage: StageView) {
   return (
-    (stage.key === 'testing' && stage.status !== 'passed' && stage.permission.supplement) ||
     (stage.status === 'pending' && (stage.permission.execute || stage.permission.confirm)) ||
     (stage.status === 'review' && stage.permission.confirm)
+  )
+}
+
+function canReportTestingBug(stage: StageView) {
+  return (
+    stage.key === 'testing' &&
+    stage.permission.supplement &&
+    stage.status !== 'passed' &&
+    (stage.status === 'pending' || stage.testingBugs.length > 0)
   )
 }
 
@@ -2610,7 +2838,7 @@ function formatRepoBinding(repo: RepoBinding | null) {
 
 function stageRoleLabel(task: TaskView, stage: StageView, users: { id: string; name: string }[]) {
   if (stage.key === 'requirement') {
-    return `需求负责人 · ${userName(task.reqOwnerId, users)}`
+    return `产品经理 · ${userName(task.pmId, users)}`
   }
   if (stage.key === 'design' || stage.key === 'delivery') {
     return `创建人/负责人 · ${userName(task.reqOwnerId, users)}`
@@ -2625,6 +2853,25 @@ function stageRoleLabel(task: TaskView, stage: StageView, users: { id: string; n
     return `后端开发 · ${userName(task.backendDevId, users)}`
   }
   return '相关人员'
+}
+
+function stageOwnerName(task: TaskView, stage: StageView, users: { id: string; name: string }[]) {
+  if (stage.key === 'requirement') {
+    return userName(task.pmId, users)
+  }
+  if (stage.key === 'design' || stage.key === 'delivery') {
+    return userName(task.reqOwnerId, users)
+  }
+  if (stage.key === 'testing') {
+    return userName(task.testerId, users)
+  }
+  if (stage.branch === 'frontend') {
+    return userName(task.frontendDevId, users)
+  }
+  if (stage.branch === 'backend') {
+    return userName(task.backendDevId, users)
+  }
+  return '系统'
 }
 
 function userName(userId: string | null | undefined, users: { id: string; name: string }[]) {
@@ -2788,7 +3035,7 @@ function getSnapshotItems(task: TaskView, stage: StageView) {
   if (stage.key === 'requirement') {
     const artifact = requirementArtifact(stage.artifact)
     return [
-      { label: '澄清问题', value: `${task.clarifications.length} 条` },
+      { label: '问题澄清', value: `${task.clarifications.length} 条` },
       { label: '验收标准', value: `${artifact.acceptance.length} 条` },
       { label: '风险', value: `${artifact.risks.length} 条` },
     ]
@@ -2799,6 +3046,7 @@ function getSnapshotItems(task: TaskView, stage: StageView) {
     return [
       { label: '前端设计', value: artifact.frontendDesign ? '已生成' : '未生成' },
       { label: '后端设计', value: artifact.backendDesign ? '已生成' : '未生成' },
+      { label: '测试用例', value: artifact.testCases ? '已生成' : '未生成' },
       { label: '补充记录', value: `${artifact.supplements.length} 条` },
     ]
   }
@@ -2861,6 +3109,7 @@ function designArtifact(value: unknown) {
     frontendDesign: asString(obj?.frontendDesign),
     backendDesign: asString(obj?.backendDesign),
     apiDoc: asString(obj?.apiDoc),
+    testCases: asString(obj?.testCases),
     supplements: asStringArray(obj?.supplements),
   }
 }
@@ -2877,10 +3126,53 @@ function developmentArtifact(value: unknown) {
 function reviewArtifact(value: unknown) {
   const obj = asRecord(value)
   return {
+    summary: asString(obj?.summary),
+    keyConclusions: asStringArray(obj?.keyConclusions),
+    downstreamInputs: asStringArray(obj?.downstreamInputs),
     high: asNumber(obj?.high),
     medium: asNumber(obj?.medium),
     low: asNumber(obj?.low),
     issues: asReviewIssues(obj?.issues),
+  }
+}
+
+function verificationArtifact(value: unknown) {
+  const obj = asRecord(value)
+  return {
+    summary: asString(obj?.summary),
+    keyConclusions: asStringArray(obj?.keyConclusions),
+    downstreamInputs: asStringArray(obj?.downstreamInputs),
+    verificationScope: asStringArray(obj?.verificationScope),
+    verificationResult: asString(obj?.verificationResult),
+    rejectionReason: asString(obj?.rejectionReason),
+    passBasis: asString(obj?.passBasis),
+  }
+}
+
+function testingArtifact(value: unknown) {
+  const obj = asRecord(value)
+  return {
+    summary: asString(obj?.summary),
+    keyConclusions: asStringArray(obj?.keyConclusions),
+    downstreamInputs: asStringArray(obj?.downstreamInputs),
+    testScope: asStringArray(obj?.testScope),
+    executionResult: asString(obj?.executionResult),
+    bugSummary: asString(obj?.bugSummary),
+    regressionConclusion: asString(obj?.regressionConclusion),
+    testConclusion: asString(obj?.testConclusion),
+  }
+}
+
+function deliveryArtifact(value: unknown) {
+  const obj = asRecord(value)
+  return {
+    summary: asString(obj?.summary),
+    keyConclusions: asStringArray(obj?.keyConclusions),
+    downstreamInputs: asStringArray(obj?.downstreamInputs),
+    deliveryItems: asStringArray(obj?.deliveryItems),
+    releaseNotes: asString(obj?.releaseNotes),
+    rollbackPlan: asString(obj?.rollbackPlan),
+    handoffConclusion: asString(obj?.handoffConclusion),
   }
 }
 

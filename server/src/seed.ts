@@ -1,6 +1,7 @@
 import type { DatabaseSync } from 'node:sqlite'
 import { withTransaction } from './db.js'
 import { STAGE_DEFINITIONS, nowIso, type Branch, type StageKey, type User } from './domain.js'
+import { buildDesignArtifact } from './executor.js'
 
 export const MOCK_USERS: User[] = [
   { id: 'u-pm-1', name: '产品 · 林清', role: 'pm' },
@@ -184,6 +185,8 @@ function seedArtifact(key: StageKey, branch: Branch, title: string): string {
   if (key === 'requirement') {
     return JSON.stringify({
       summary: `围绕「${title}」的需求已收敛为可执行输入。`,
+      keyConclusions: ['需求目标已收敛', '验收标准已明确', '影响范围已识别'],
+      downstreamInputs: ['供详细设计阶段拆分前后端方案', '供开发阶段理解业务目标与约束'],
       risks: ['数据一致性风险', '第三方依赖风险'],
       acceptance: ['核心链路可端到端跑通', '异常有兜底'],
       impactScope: '前端 + 后端',
@@ -191,14 +194,13 @@ function seedArtifact(key: StageKey, branch: Branch, title: string): string {
     })
   }
   if (key === 'design') {
-    return JSON.stringify({
-      frontendDesign: `## 前端设计\n${title} 主视图与状态设计。`,
-      backendDesign: `## 后端设计\n${title} 服务与数据模型。`,
-      apiDoc: `## 接口文档\n${title} 相关接口。`,
-    })
+    return JSON.stringify(buildDesignArtifact(title))
   }
   if (key === 'development') {
     return JSON.stringify({
+      summary: `${branch === 'frontend' ? '前端' : '后端'}分支实现已完成，可进入功能验证。`,
+      keyConclusions: [`${branch === 'frontend' ? '前端' : '后端'}实现已完成`, '新增文件 1 个', '修改文件 1 个'],
+      downstreamInputs: ['供功能验证阶段验证实现结果', '供代码审查阶段定位改动范围'],
       changes: `${branch === 'frontend' ? '前端' : '后端'}分支已完成「${title}」实现。`,
       addedFiles: branch === 'frontend' ? ['src/pages/x.tsx'] : ['src/service/x.ts'],
       modifiedFiles: branch === 'frontend' ? ['src/App.tsx'] : ['src/index.ts'],

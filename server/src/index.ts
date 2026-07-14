@@ -200,6 +200,15 @@ app.post('/api/tasks/:taskId/clarifications/:clarificationId', async (request, r
   }
 })
 
+app.post('/api/tasks/:taskId/stages/requirement/reunderstand', async (request, reply) => {
+  const { taskId } = request.params as { taskId: string }
+  try {
+    return { task: service.reunderstandRequirement(taskId, currentUser(request)) }
+  } catch (error) {
+    return handleError(reply, error)
+  }
+})
+
 app.post('/api/tasks/:taskId/verify/:branch', async (request, reply) => {
   const { taskId, branch } = request.params as { taskId: string; branch: Branch }
   const body = request.body as { pass?: boolean; reason?: string }

@@ -12,6 +12,7 @@ import {
   fetchUsers,
   markTestingBugFixed as markTestingBugFixedRequest,
   passTesting as passTestingRequest,
+  reunderstandRequirement as reunderstandRequirementRequest,
   reportTestingBug as reportTestingBugRequest,
   reviewBranch as reviewBranchRequest,
   rollbackDelivery as rollbackDeliveryRequest,
@@ -144,6 +145,7 @@ export function WorkspaceStoreProvider({ children }: { children: ReactNode }) {
     () => wrap((taskId: string, key: StageKey, branch: Branch, prompt?: string) => executeStageRequest(taskId, key, branch, prompt)),
     [wrap],
   )
+  const reunderstandRequirement = useMemo(() => wrap((taskId: string) => reunderstandRequirementRequest(taskId)), [wrap])
   const advanceStage = useMemo(() => wrap((taskId: string, key: StageKey) => advanceStageRequest(taskId, key)), [wrap])
   const bindRepo = useMemo(
     () => wrap((taskId: string, branch: Branch, path: string) => bindRepoRequest(taskId, branch, path)),
@@ -208,6 +210,7 @@ export function WorkspaceStoreProvider({ children }: { children: ReactNode }) {
       cancelTask,
       saveExtraPrompt,
       executeStage,
+      reunderstandRequirement,
       advanceStage,
       bindRepo,
       answerClarification,
@@ -240,6 +243,7 @@ export function WorkspaceStoreProvider({ children }: { children: ReactNode }) {
       cancelTask,
       saveExtraPrompt,
       executeStage,
+      reunderstandRequirement,
       advanceStage,
       bindRepo,
       answerClarification,

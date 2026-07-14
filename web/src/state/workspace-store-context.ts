@@ -25,6 +25,7 @@ export interface WorkspaceStoreValue {
   cancelTask: (taskId: string) => Promise<void>
   saveExtraPrompt: (taskId: string, key: StageKey, branch: Branch, prompt: string) => Promise<void>
   executeStage: (taskId: string, key: StageKey, branch: Branch, prompt?: string) => Promise<void>
+  reunderstandRequirement: (taskId: string) => Promise<void>
   advanceStage: (taskId: string, key: StageKey) => Promise<void>
   bindRepo: (taskId: string, branch: Branch, path: string) => Promise<void>
   answerClarification: (taskId: string, clarificationId: string, answer: string) => Promise<void>

@@ -114,6 +114,11 @@ export async function answerClarification(taskId: string, clarificationId: strin
   return payload.task
 }
 
+export async function reunderstandRequirement(taskId: string): Promise<TaskView> {
+  const payload = await post<{ task: TaskView }>(`/tasks/${taskId}/stages/requirement/reunderstand`)
+  return payload.task
+}
+
 export async function verifyBranch(taskId: string, branch: Branch, pass: boolean, reason: string): Promise<TaskView> {
   const payload = await post<{ task: TaskView }>(`/tasks/${taskId}/verify/${branch}`, { pass, reason })
   return payload.task
