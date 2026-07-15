@@ -269,7 +269,7 @@ export function WorkspacePage() {
     [selectedTask],
   )
 
-  const toolbarActions = useMemo(() => getToolbarActions(selectedTask, selectedStage), [selectedStage, selectedTask])
+  const toolbarActions = useMemo(() => getToolbarActions(selectedTask, selectedStage, currentUser?.id ?? ''), [currentUser?.id, selectedStage, selectedTask])
   const currentThemeLabel = resolvedTheme === 'dark' ? '暗色' : '亮色'
   const sharedStages = useMemo(
     () => selectedTask?.stages.filter((stage) => stage.branch === 'shared' && stage.key !== 'testing' && stage.key !== 'delivery') ?? [],
@@ -337,6 +337,16 @@ export function WorkspacePage() {
   const canBindLocalRepo = Boolean(showDevelopmentRepoToolbar && !selectedRepo)
   const showProcessCard = Boolean(selectedStage?.status === 'running' && processRunning)
   const showTestingBugPrompt = Boolean(selectedStage && canReportTestingBug(selectedStage))
+  const canOperateRequirementClarifications = Boolean(selectedTask && selectedStage?.key === 'requirement' && currentUser?.id === selectedTask.pmId)
+  const canExecuteSelectedStage = Boolean(selectedTask && selectedStage && currentUser && canExecuteStageAction(selectedTask, selectedStage, currentUser.id))
+  const pendingTasks = useMemo(
+    () => tasks.filter((task) => taskNeedsCurrentUserAction(task, currentUser?.id ?? '')),
+    [currentUser?.id, tasks],
+  )
+  const otherTasks = useMemo(() => {
+    const pendingTaskIds = new Set(pendingTasks.map((task) => task.id))
+    return tasks.filter((task) => !pendingTaskIds.has(task.id))
+  }, [pendingTasks, tasks])
 
   useEffect(() => {
     if (!currentUser) {
@@ -727,26 +737,17 @@ export function WorkspacePage() {
             </Button>
 
             <div className="mt-4">
-              <div className="mb-2 px-1 text-xs uppercase tracking-[0.24em] text-muted-foreground">任务</div>
-              <div className="space-y-1">
-                {tasks.map((task) => (
-                  <button
-                    key={task.id}
-                    type="button"
-                    className={cn(
-                      'w-full rounded-lg px-3 py-2 text-left transition-colors',
-                      task.id === selectedTaskId ? 'bg-primary/8' : 'hover:bg-card/70',
-                    )}
-                    onClick={() => setSelectedTaskId(task.id)}
-                  >
-                    <p className="truncate text-sm font-medium">{task.title}</p>
-                    <div className="mt-1 flex items-center justify-between gap-2 text-[11px] text-muted-foreground">
-                      <span className="truncate">{task.stateLabel}</span>
-                      <span>{formatDateTime(task.updatedAt)}</span>
-                    </div>
-                  </button>
-                ))}
-              </div>
+              <TaskListSection
+                title="待你处理"
+                tasks={pendingTasks}
+                selectedTaskId={selectedTaskId}
+                onSelect={setSelectedTaskId}
+                emptyHint="当前没有待你处理的任务。"
+              />
+            </div>
+
+            <div className="mt-4">
+              <TaskListSection title="其他任务" tasks={otherTasks} selectedTaskId={selectedTaskId} onSelect={setSelectedTaskId} />
             </div>
           </div>
 
@@ -913,7 +914,7 @@ export function WorkspacePage() {
                     <div className="ml-auto flex shrink-0 items-center gap-1.5">
                       {selectedStage.key === 'requirement' &&
                       selectedStage.status === 'review' &&
-                      selectedStage.permission.execute ? (
+                      canExecuteSelectedStage ? (
                         <Button
                           variant="outline"
                           size="icon"
@@ -954,7 +955,7 @@ export function WorkspacePage() {
                     </Card>
                   ) : null}
 
-                  {selectedStage.status === 'pending' && selectedStage.permission.execute && isAgentStage(selectedStage.key) ? (
+                  {selectedStage.status === 'pending' && canExecuteSelectedStage && isAgentStage(selectedStage.key) ? (
                     <StagePromptCard
                       stage={selectedStage}
                       promptDraft={promptDraft}
@@ -1020,6 +1021,7 @@ export function WorkspacePage() {
                       clarifications={selectedTask.clarifications}
                       drafts={clarificationDrafts}
                       savingId={clarificationSavingId}
+                      canConfirm={canOperateRequirementClarifications}
                       onDraftChange={(clarificationId, patch) =>
                         setClarificationDrafts((current) => ({
                           ...current,
@@ -1828,12 +1830,14 @@ function ClarificationPanel({
   clarifications,
   drafts,
   savingId,
+  canConfirm,
   onDraftChange,
   onConfirm,
 }: {
   clarifications: ClarificationView[]
   drafts: Record<string, ClarificationDraft>
   savingId: string
+  canConfirm: boolean
   onDraftChange: (clarificationId: string, patch: Partial<ClarificationDraft>) => void
   onConfirm: (clarification: ClarificationView) => void
 }) {
@@ -1857,6 +1861,8 @@ function ClarificationPanel({
                     </p>
                     {confirmed ? (
                       <p className="mt-2 text-sm text-muted-foreground">已确认：{clarification.answer}</p>
+                    ) : !canConfirm ? (
+                      <p className="mt-2 text-sm text-muted-foreground">待对应产品经理确认。</p>
                     ) : (
                       <div className="mt-2 space-y-2">
                         <select
@@ -1882,7 +1888,7 @@ function ClarificationPanel({
                   <Badge variant={confirmed ? 'success' : 'warning'}>{confirmed ? '已确认' : '待确认'}</Badge>
                 </div>
 
-                {!confirmed ? (
+                {!confirmed && canConfirm ? (
                   <div className="mt-2.5 flex justify-end">
                     <Button
                       className="h-9 rounded-lg px-3.5"
@@ -2548,6 +2554,49 @@ function EmptyHint({ children }: { children: ReactNode }) {
   return <div className="rounded-lg border border-dashed border-border px-4 py-3 text-sm text-muted-foreground">{children}</div>
 }
 
+function TaskListSection({
+  title,
+  tasks,
+  selectedTaskId,
+  onSelect,
+  emptyHint,
+}: {
+  title: string
+  tasks: TaskView[]
+  selectedTaskId: string
+  onSelect: (taskId: string) => void
+  emptyHint?: string
+}) {
+  return (
+    <>
+      <div className="mb-2 px-1 text-xs uppercase tracking-[0.24em] text-muted-foreground">{title}</div>
+      {tasks.length ? (
+        <div className="space-y-1">
+          {tasks.map((task) => (
+            <button
+              key={task.id}
+              type="button"
+              className={cn(
+                'w-full rounded-lg px-3 py-2 text-left transition-colors',
+                task.id === selectedTaskId ? 'bg-primary/8' : 'hover:bg-card/70',
+              )}
+              onClick={() => onSelect(task.id)}
+            >
+              <p className="truncate text-sm font-medium">{task.title}</p>
+              <div className="mt-1 flex items-center justify-between gap-2 text-[11px] text-muted-foreground">
+                <span className="truncate">{task.stateLabel}</span>
+                <span>{formatDateTime(task.updatedAt)}</span>
+              </div>
+            </button>
+          ))}
+        </div>
+      ) : emptyHint ? (
+        <EmptyHint>{emptyHint}</EmptyHint>
+      ) : null}
+    </>
+  )
+}
+
 function CenteredState({
   title,
   description,
@@ -2568,7 +2617,7 @@ function CenteredState({
   )
 }
 
-function getToolbarActions(task: TaskView | null, stage: StageView | null): ToolbarAction[] {
+function getToolbarActions(task: TaskView | null, stage: StageView | null, currentUserId: string): ToolbarAction[] {
   if (!task || !stage) {
     return []
   }
@@ -2586,9 +2635,10 @@ function getToolbarActions(task: TaskView | null, stage: StageView | null): Tool
   if (
     ((stage.key === 'requirement' && !task.clarifications.some((item) => item.status !== 'confirmed')) || stage.key === 'design') &&
     stage.status === 'review' &&
-    stage.permission.confirm
+    stage.permission.confirm &&
+    !(stage.key === 'design' && hasDesignConfirmationForUser(task, stage, currentUserId))
   ) {
-    actions.push({ type: 'advance', label: '通过并推进', variant: 'default', icon: ChevronRight })
+    actions.push({ type: 'advance', label: stage.key === 'design' ? '确认设计' : '通过并推进', variant: 'default', icon: ChevronRight })
   }
 
   if (stage.key === 'verification' && stage.status === 'pending' && stage.permission.confirm) {
@@ -2629,14 +2679,76 @@ function canReportTestingBug(stage: StageView) {
   )
 }
 
+function hasDesignConfirmationForUser(task: TaskView, stage: StageView, currentUserId: string) {
+  if (stage.key !== 'design' || stage.branch !== 'shared' || !stage.artifact || typeof stage.artifact !== 'object') {
+    return false
+  }
+  const confirmations = (stage.artifact as { confirmations?: { frontend?: boolean; backend?: boolean } }).confirmations
+  if (!confirmations) {
+    return false
+  }
+  if (currentUserId === task.frontendDevId) {
+    return Boolean(confirmations.frontend)
+  }
+  if (currentUserId === task.backendDevId) {
+    return Boolean(confirmations.backend)
+  }
+  return false
+}
+
+function canExecuteStageAction(task: TaskView, stage: StageView, currentUserId: string) {
+  if (stage.key === 'requirement') {
+    return currentUserId === task.pmId || currentUserId === task.reqOwnerId
+  }
+  return stage.permission.execute
+}
+
+function taskNeedsCurrentUserAction(task: TaskView, currentUserId: string) {
+  if (!currentUserId) {
+    return false
+  }
+  const testingStage = task.stages.find((stage) => stage.key === 'testing' && stage.branch === 'shared')
+  return task.stages.some((stage) => {
+    if (stage.status === 'passed') {
+      return false
+    }
+    if (stage.key === 'requirement') {
+      if (stage.status === 'pending') {
+        return canExecuteStageAction(task, stage, currentUserId)
+      }
+      if (stage.status === 'review') {
+        const canReunderstand = canExecuteStageAction(task, stage, currentUserId)
+        const canClarify = currentUserId === task.pmId && task.clarifications.some((item) => item.status !== 'confirmed')
+        const canAdvance = currentUserId === task.pmId && !task.clarifications.some((item) => item.status !== 'confirmed')
+        return canReunderstand || canClarify || canAdvance
+      }
+      return false
+    }
+    if (isStageActionable(stage)) {
+      if (stage.key === 'design' && stage.status === 'review' && hasDesignConfirmationForUser(task, stage, currentUserId)) {
+        return false
+      }
+      return true
+    }
+    return false
+  }) || (testingStage ? canTaskTestingNeedAction(task, testingStage, currentUserId) : false)
+}
+
+function canTaskTestingNeedAction(task: TaskView, testingStage: StageView, currentUserId: string) {
+  if (currentUserId === task.testerId) {
+    return testingStage.status === 'pending' && testingStage.testingBugs.some((bug) => bug.status === 'fixed')
+  }
+  return testingStage.testingBugs.some((bug) => canMarkTestingBugFixed(task, bug, currentUserId))
+}
+
 function getDialogConfig(type: ActionType, stage: StageView) {
   if (type === 'advance') {
     return {
-      title: '通过并推进',
-      description: stage.key === 'requirement' ? '会推进到详细设计。' : '会推进到前后端并行开发。',
+      title: stage.key === 'design' ? '确认设计' : '通过并推进',
+      description: stage.key === 'requirement' ? '会推进到详细设计。' : '前后端都确认后才会推进到并行开发。',
       noteLabel: '',
       notePlaceholder: '',
-      confirmLabel: '确认推进',
+      confirmLabel: stage.key === 'design' ? '确认设计' : '确认推进',
       confirmVariant: 'default' as const,
     }
   }
@@ -2757,6 +2869,9 @@ function branchLabel(branch: Branch): string {
 }
 
 function stageBadge(task: TaskView, stage: StageView) {
+  if (stage.key === 'design' && stage.status === 'review' && stage.pendingNote) {
+    return { label: stage.pendingNote, variant: 'warning' as const }
+  }
   if (stage.status !== 'blocked') {
     return statusBadgeMap[stage.status]
   }

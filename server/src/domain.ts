@@ -89,7 +89,7 @@ type PermRoleKey = 'pm' | 'frontendDev' | 'backendDev' | 'tester' | 'owner' | 'o
 const MATRIX: Record<PermRoleKey, Record<string, string>> = {
   pm: {
     requirement: '111',
-    design: '001',
+    design: '000',
     'development:frontend': '000',
     'verification:frontend': '000',
     'development:backend': '000',
@@ -101,7 +101,7 @@ const MATRIX: Record<PermRoleKey, Record<string, string>> = {
   },
   frontendDev: {
     requirement: '100',
-    design: '101',
+    design: '111',
     'development:frontend': '111',
     'verification:frontend': '111',
     'development:backend': '000',
@@ -113,7 +113,7 @@ const MATRIX: Record<PermRoleKey, Record<string, string>> = {
   },
   backendDev: {
     requirement: '100',
-    design: '101',
+    design: '111',
     'development:frontend': '000',
     'verification:frontend': '000',
     'development:backend': '111',
@@ -137,8 +137,8 @@ const MATRIX: Record<PermRoleKey, Record<string, string>> = {
   },
   owner: {
     // creator / reqOwner
-    requirement: '101',
-    design: '111',
+    requirement: '100',
+    design: '100',
     'development:frontend': '000',
     'verification:frontend': '000',
     'development:backend': '000',

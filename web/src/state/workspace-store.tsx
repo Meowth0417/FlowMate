@@ -27,6 +27,85 @@ import type { Branch, BugTarget, CreateTaskInput, StageKey, TaskView, User } fro
 
 const STORAGE_KEY = 'flowmate.currentUserId'
 
+function canFixTestingBug(task: TaskView, currentUserId: string) {
+  const testingStage = task.stages.find((item) => item.key === 'testing' && item.branch === 'shared')
+  if (!testingStage) {
+    return false
+  }
+  return testingStage.testingBugs.some((bug) => {
+    if (bug.status === 'closed' || bug.status === 'fixed') {
+      return false
+    }
+    if (bug.target === 'frontend') {
+      return currentUserId === task.frontendDevId
+    }
+    if (bug.target === 'backend') {
+      return currentUserId === task.backendDevId
+    }
+    return (
+      (currentUserId === task.frontendDevId && !bug.frontendFixed) ||
+      (currentUserId === task.backendDevId && !bug.backendFixed)
+    )
+  })
+}
+
+function canCloseTestingBug(task: TaskView, currentUserId: string) {
+  const testingStage = task.stages.find((item) => item.key === 'testing' && item.branch === 'shared')
+  if (!testingStage || currentUserId !== task.testerId) {
+    return false
+  }
+  return testingStage.status === 'pending' && testingStage.testingBugs.some((bug) => bug.status === 'fixed')
+}
+
+function hasDesignConfirmationForUser(task: TaskView, stage: TaskView['stages'][number], currentUserId: string) {
+  if (stage.key !== 'design' || stage.branch !== 'shared' || !stage.artifact || typeof stage.artifact !== 'object') {
+    return false
+  }
+  const confirmations = (stage.artifact as { confirmations?: { frontend?: boolean; backend?: boolean } }).confirmations
+  if (!confirmations) {
+    return false
+  }
+  if (currentUserId === task.frontendDevId) {
+    return Boolean(confirmations.frontend)
+  }
+  if (currentUserId === task.backendDevId) {
+    return Boolean(confirmations.backend)
+  }
+  return false
+}
+
+function taskNeedsCurrentUserAction(task: TaskView, currentUserId: string) {
+  if (!currentUserId) {
+    return false
+  }
+  return task.stages.some((stage) => {
+    if (stage.status === 'passed') {
+      return false
+    }
+    if (stage.key === 'requirement') {
+      if (stage.status === 'pending') {
+        return stage.permission.execute
+      }
+      if (stage.status === 'review') {
+        const hasOpenClarifications = task.clarifications.some((item) => item.status !== 'confirmed')
+        return stage.permission.execute || (stage.permission.confirm && (hasOpenClarifications || !hasOpenClarifications))
+      }
+      return false
+    }
+    if ((stage.status === 'pending' && (stage.permission.execute || stage.permission.confirm)) || (stage.status === 'review' && stage.permission.confirm)) {
+      if (stage.key === 'design' && stage.status === 'review' && hasDesignConfirmationForUser(task, stage, currentUserId)) {
+        return false
+      }
+      return true
+    }
+    return false
+  }) || canFixTestingBug(task, currentUserId) || canCloseTestingBug(task, currentUserId)
+}
+
+function defaultTaskId(tasks: TaskView[], currentUserId: string) {
+  return tasks.find((task) => taskNeedsCurrentUserAction(task, currentUserId))?.id ?? tasks[0]?.id ?? ''
+}
+
 export function WorkspaceStoreProvider({ children }: { children: ReactNode }) {
   const [users, setUsers] = useState<User[]>([])
   const [currentUserId, setCurrentUserId] = useState<string>(() => localStorage.getItem(STORAGE_KEY) ?? '')
@@ -67,8 +146,12 @@ export function WorkspaceStoreProvider({ children }: { children: ReactNode }) {
   )
 
   const selectedTask = useMemo(
-    () => tasks.find((task) => task.id === selectedTaskId) ?? tasks[0] ?? null,
-    [selectedTaskId, tasks],
+    () =>
+      tasks.find((task) => task.id === selectedTaskId) ??
+      tasks.find((task) => taskNeedsCurrentUserAction(task, currentUserId)) ??
+      tasks[0] ??
+      null,
+    [currentUserId, selectedTaskId, tasks],
   )
 
   const mergeTask = useCallback((updatedTask: TaskView) => {
@@ -90,7 +173,7 @@ export function WorkspaceStoreProvider({ children }: { children: ReactNode }) {
     try {
       const nextTasks = await fetchTasks()
       setTasks(nextTasks)
-      setSelectedTaskId((current) => (nextTasks.some((t) => t.id === current) ? current : nextTasks[0]?.id ?? ''))
+      setSelectedTaskId((current) => (nextTasks.some((t) => t.id === current) ? current : defaultTaskId(nextTasks, currentUserId)))
       setError(null)
     } catch (requestError) {
       setError((requestError as Error).message)

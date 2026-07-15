@@ -360,11 +360,16 @@ export class WorkflowService {
         )
 
         const designStage = this.getStageRow(task.id, 'design', 'shared')
-        this.syncNormalizedStageArtifact(
-          designStage,
-          normalizeDesignArtifact(task.title, parseArtifact(designStage.artifact_json), designStage.summary),
-          now,
-        )
+        const normalizedDesign = normalizeDesignArtifact(task.title, parseArtifact(designStage.artifact_json), designStage.summary)
+        this.syncNormalizedStageArtifact(designStage, normalizedDesign, now)
+        if (designStage.status === 'review') {
+          const note = this.designConfirmationNote(this.readDesignConfirmations(normalizedDesign.artifact))
+          if (designStage.pending_note !== note) {
+            this.db
+              .prepare('UPDATE task_stages SET pending_note = ?, updated_at = ? WHERE task_id = ? AND stage_key = ? AND branch = ?')
+              .run(note, now, task.id, 'design', 'shared')
+          }
+        }
 
         for (const branch of ['frontend', 'backend'] as const) {
           const developmentStage = this.getStageRow(task.id, 'development', branch)
@@ -851,6 +856,9 @@ export class WorkflowService {
     if (stage.status !== 'pending') {
       throw new Error('当前阶段不可执行')
     }
+    if (key === 'requirement') {
+      this.assertRequirementExecutor(task, actor)
+    }
     if (key === 'development') {
       const repo = branch === 'frontend' ? parseRepoField(task.frontend_repo) : parseRepoField(task.backend_repo)
       if (!repo) {
@@ -950,11 +958,12 @@ export class WorkflowService {
       .prepare('UPDATE stage_runs SET status = ?, finished_at = ? WHERE id = ?')
       .run('complete', now, run.id)
     this.runProcesses.delete(run.id)
+    const pendingNote = key === 'design' ? this.designConfirmationNote(this.readDesignConfirmations(artifact)) : ''
     this.db
       .prepare(
-        'UPDATE task_stages SET status = ?, summary = ?, artifact_json = ?, updated_at = ? WHERE task_id = ? AND stage_key = ? AND branch = ?',
+        'UPDATE task_stages SET status = ?, summary = ?, artifact_json = ?, pending_note = ?, updated_at = ? WHERE task_id = ? AND stage_key = ? AND branch = ?',
       )
-      .run(postStatus, summary, run.artifact_json, now, taskId, key, branch)
+      .run(postStatus, summary, run.artifact_json, pendingNote, now, taskId, key, branch)
 
     if (key === 'development') {
       this.setStageStatus(taskId, 'verification', branch, 'pending')
@@ -1012,6 +1021,63 @@ export class WorkflowService {
     return sections.join('\n\n')
   }
 
+  private assertRequirementPm(task: TaskRow, actor: User) {
+    if (actor.id !== task.pm_id) {
+      throw new Error('仅对应产品经理可执行该操作')
+    }
+  }
+
+  private assertRequirementExecutor(task: TaskRow, actor: User) {
+    if (actor.id !== task.pm_id && actor.id !== task.req_owner_id) {
+      throw new Error('仅对应产品经理或需求负责人可执行该操作')
+    }
+  }
+
+  private assertDesignConfirmer(task: TaskRow, actor: User) {
+    if (actor.id !== task.frontend_dev_id && actor.id !== task.backend_dev_id) {
+      throw new Error('仅前后端开发可确认详细设计')
+    }
+  }
+
+  private designConfirmationNote(confirmations: { frontend: boolean; backend: boolean }) {
+    if (!confirmations.frontend && !confirmations.backend) {
+      return '待前后端确认'
+    }
+    if (!confirmations.frontend) {
+      return '待前端确认'
+    }
+    if (!confirmations.backend) {
+      return '待后端确认'
+    }
+    return ''
+  }
+
+  private readDesignConfirmations(artifact: Record<string, unknown> | null) {
+    const raw = artifact?.confirmations
+    if (!raw || typeof raw !== 'object') {
+      return { frontend: false, backend: false }
+    }
+    return {
+      frontend: Boolean((raw as Record<string, unknown>).frontend),
+      backend: Boolean((raw as Record<string, unknown>).backend),
+    }
+  }
+
+  private clearDesignConfirmationState(taskId: string) {
+    const stage = this.getStageRow(taskId, 'design', 'shared')
+    const artifact = parseArtifact(stage.artifact_json)
+    if (!artifact) {
+      this.db
+        .prepare("UPDATE task_stages SET pending_note = '', updated_at = ? WHERE task_id = ? AND stage_key = 'design' AND branch = 'shared'")
+        .run(nowIso(), taskId)
+      return
+    }
+    artifact.confirmations = { frontend: false, backend: false }
+    this.db
+      .prepare("UPDATE task_stages SET artifact_json = ?, pending_note = '', updated_at = ? WHERE task_id = ? AND stage_key = 'design' AND branch = 'shared'")
+      .run(JSON.stringify(artifact), nowIso(), taskId)
+  }
+
   getActiveRunProcess(taskId: string, key: StageKey, branch: Branch, viewer: User) {
     this.tickRunningStages(taskId)
     const stage = this.getStageRow(taskId, key, branch)
@@ -1038,6 +1104,8 @@ export class WorkflowService {
   }
 
   answerClarification(taskId: string, clarificationId: string, answer: string, actor: User): TaskView {
+    const task = this.getTaskRow(taskId)
+    this.assertRequirementPm(task, actor)
     const row = this.db.prepare('SELECT * FROM clarifications WHERE id = ? AND task_id = ?').get(clarificationId, taskId) as
       | { status: string }
       | undefined
@@ -1057,6 +1125,7 @@ export class WorkflowService {
 
   reunderstandRequirement(taskId: string, actor: User): TaskView {
     const task = this.getTaskRow(taskId)
+    this.assertRequirementExecutor(task, actor)
     const stage = this.getStageRow(taskId, 'requirement', 'shared')
     if (stage.status !== 'review') {
       throw new Error('当前需求理解不可重新执行')
@@ -1144,6 +1213,7 @@ export class WorkflowService {
       throw new Error('当前阶段尚未完成执行，无法推进')
     }
     if (key === 'requirement') {
+      this.assertRequirementPm(this.getTaskRow(taskId), actor)
       const open = this.db
         .prepare("SELECT COUNT(*) as count FROM clarifications WHERE task_id = ? AND status != 'confirmed'")
         .get(taskId) as { count: number }
@@ -1153,15 +1223,39 @@ export class WorkflowService {
       withTransaction(this.db, () => {
         this.setStageStatus(taskId, 'requirement', 'shared', 'passed')
         this.setStageStatus(taskId, 'design', 'shared', 'pending')
+        this.clearDesignConfirmationState(taskId)
         this.addTimeline(taskId, 'advanced', '进入详细设计', '', actor.id, 'design', 'shared')
         this.touchTask(taskId)
       })
     } else if (key === 'design') {
+      const task = this.getTaskRow(taskId)
+      this.assertDesignConfirmer(task, actor)
+      const artifact = parseArtifact(stage.artifact_json) ?? {}
+      const confirmations = this.readDesignConfirmations(artifact)
+      const isFrontend = actor.id === task.frontend_dev_id
+      if ((isFrontend && confirmations.frontend) || (!isFrontend && confirmations.backend)) {
+        throw new Error('你已确认过详细设计')
+      }
+      const nextConfirmations = {
+        frontend: isFrontend ? true : confirmations.frontend,
+        backend: isFrontend ? confirmations.backend : true,
+      }
+      const nextArtifact = { ...artifact, confirmations: nextConfirmations }
       withTransaction(this.db, () => {
-        this.setStageStatus(taskId, 'design', 'shared', 'passed')
-        this.setStageStatus(taskId, 'development', 'frontend', 'pending')
-        this.setStageStatus(taskId, 'development', 'backend', 'pending')
-        this.addTimeline(taskId, 'advanced', '进入前后端并行开发', '', actor.id, 'development', null)
+        if (nextConfirmations.frontend && nextConfirmations.backend) {
+          this.db
+            .prepare('UPDATE task_stages SET status = ?, artifact_json = ?, pending_note = ?, updated_at = ? WHERE task_id = ? AND stage_key = ? AND branch = ?')
+            .run('passed', JSON.stringify(nextArtifact), '', nowIso(), taskId, 'design', 'shared')
+          this.setStageStatus(taskId, 'development', 'frontend', 'pending')
+          this.setStageStatus(taskId, 'development', 'backend', 'pending')
+          this.addTimeline(taskId, 'advanced', '进入前后端并行开发', '', actor.id, 'development', null)
+        } else {
+          const pendingNote = this.designConfirmationNote(nextConfirmations)
+          this.db
+            .prepare('UPDATE task_stages SET artifact_json = ?, pending_note = ?, updated_at = ? WHERE task_id = ? AND stage_key = ? AND branch = ?')
+            .run(JSON.stringify(nextArtifact), pendingNote, nowIso(), taskId, 'design', 'shared')
+          this.addTimeline(taskId, 'stage', '详细设计待另一侧确认', pendingNote, actor.id, 'design', 'shared')
+        }
         this.touchTask(taskId)
       })
     } else {
@@ -1519,8 +1613,10 @@ export class WorkflowService {
         if (target === 'requirement') {
           this.setStageStatus(taskId, 'requirement', 'shared', 'pending')
           this.setStageStatus(taskId, 'design', 'shared', 'blocked')
+          this.clearDesignConfirmationState(taskId)
         } else {
           this.setStageStatus(taskId, 'design', 'shared', 'pending')
+          this.clearDesignConfirmationState(taskId)
         }
         this.db.prepare('UPDATE tasks SET state = ?, updated_at = ? WHERE id = ?').run('pending', nowIso(), taskId)
       } else if (target === 'frontend' || target === 'backend') {
@@ -1563,6 +1659,7 @@ export class WorkflowService {
     if (!note.trim()) {
       throw new Error('补充内容不能为空')
     }
+    this.assertRequirementPm(this.getTaskRow(taskId), actor)
     const stage = this.getStageRow(taskId, 'requirement', 'shared')
     const artifact = stage.artifact_json ? JSON.parse(stage.artifact_json) : {}
     artifact.fullDoc = `${String(artifact.fullDoc ?? '')}\n\n## 补充需求\n- ${note}（影响：${impact}）`
@@ -1575,6 +1672,7 @@ export class WorkflowService {
       const design = this.getStageRow(taskId, 'design', 'shared')
       if (reenterDesign && design.status !== 'blocked') {
         this.setStageStatus(taskId, 'design', 'shared', 'pending')
+        this.clearDesignConfirmationState(taskId)
       } else if (!reenterDesign) {
         const targets: Branch[] = impact === 'both' ? ['frontend', 'backend'] : [impact]
         for (const branch of targets) {
@@ -1606,9 +1704,10 @@ export class WorkflowService {
     ]
     artifact.supplements = supplements
     artifact.testCases = buildDesignArtifact(task.title, supplements).testCases
+    artifact.confirmations = { frontend: false, backend: false }
     this.db
-      .prepare('UPDATE task_stages SET summary = ?, artifact_json = ?, updated_at = ? WHERE task_id = ? AND stage_key = ? AND branch = ?')
-      .run(DESIGN_STAGE_SUMMARY, JSON.stringify(artifact), nowIso(), taskId, 'design', 'shared')
+      .prepare('UPDATE task_stages SET summary = ?, artifact_json = ?, pending_note = ?, updated_at = ? WHERE task_id = ? AND stage_key = ? AND branch = ?')
+      .run(DESIGN_STAGE_SUMMARY, JSON.stringify(artifact), this.designConfirmationNote({ frontend: false, backend: false }), nowIso(), taskId, 'design', 'shared')
     this.addTimeline(taskId, 'supplement', '补充设计', note, actor.id, 'design', 'shared')
     return this.getTaskView(taskId, actor)
   }
@@ -1639,13 +1738,20 @@ function normalizeDesignArtifact(taskTitle: string, artifact: Record<string, unk
   const supplements = asStringArrayValue(artifact.supplements)
   const base = buildDesignArtifact(taskTitle, supplements)
   const testCases = asStringValue(artifact.testCases) || asStringValue(base.testCases)
+  const confirmations =
+    artifact.confirmations && typeof artifact.confirmations === 'object'
+      ? {
+          frontend: Boolean((artifact.confirmations as Record<string, unknown>).frontend),
+          backend: Boolean((artifact.confirmations as Record<string, unknown>).backend),
+        }
+      : { frontend: false, backend: false }
   const summary = stageSummary === '前后端设计与接口文档已生成，可进入并行开发。'
     ? DESIGN_STAGE_SUMMARY
     : pickSummary(artifact, stageSummary, DESIGN_STAGE_SUMMARY)
   return {
     summary,
     artifact: withCommonArtifactFields(
-      { ...artifact, testCases },
+      { ...artifact, testCases, confirmations },
       summary,
       compactStrings(['前后端方案已统一', asStringValue(artifact.apiDoc) ? '接口契约已明确' : '', testCases ? '测试用例已准备' : '']),
       ['供前后端开发执行实现', '供验证、审查与测试阶段对照设计'],
