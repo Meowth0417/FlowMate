@@ -140,6 +140,7 @@ const notReachedBadge = { label: '未到达', variant: 'secondary' } as const
 
 type ActionType =
   | 'advance'
+  | 'reunderstand-requirement'
   | 'verify-pass'
   | 'verify-reject'
   | 'review-pass'
@@ -170,6 +171,7 @@ interface LocalDirBrowserState {
   path: string
   parent: string
   items: LocalDirItem[]
+  drives: LocalDirItem[]
   selectedPath: string
   loading: boolean
   error: string
@@ -246,6 +248,7 @@ export function WorkspacePage() {
     path: '',
     parent: '',
     items: [],
+    drives: [],
     selectedPath: '',
     loading: false,
     error: '',
@@ -487,7 +490,7 @@ export function WorkspacePage() {
 
   function openDialog(type: ActionType) {
     setDialog({ type })
-    setDialogNote('')
+    setDialogNote(type === 'reunderstand-requirement' ? selectedStage?.extraPrompt ?? '' : '')
     setDialogImpact('both')
     setDialogReenterDesign(true)
     setDialogRollbackTarget('frontend')
@@ -507,7 +510,14 @@ export function WorkspacePage() {
     }
     try {
       setExecuteSubmitting(true)
-      await executeStage(selectedTask.id, selectedStage.key, selectedStage.branch, promptDraft.trim())
+      const panel = selectedStageAgentPanels[selectedStageAgent]
+      await executeStage(selectedTask.id, selectedStage.key, selectedStage.branch, {
+        prompt: promptDraft.trim(),
+        agentName: selectedStageAgent,
+        modelId: panel?.modelId || '',
+        effort: panel?.effort || '',
+        fastMode: panel?.fastMode || 'off',
+      })
     } finally {
       setExecuteSubmitting(false)
     }
@@ -517,12 +527,7 @@ export function WorkspacePage() {
     if (!selectedTask || !selectedStage || selectedStage.key !== 'requirement' || selectedStage.status !== 'review') {
       return
     }
-    try {
-      setExecuteSubmitting(true)
-      await reunderstandRequirement(selectedTask.id)
-    } finally {
-      setExecuteSubmitting(false)
-    }
+    await reunderstandRequirement(selectedTask.id, dialogNote.trim())
   }
 
   async function loadLocalDirs(path?: string) {
@@ -536,14 +541,20 @@ export function WorkspacePage() {
     }))
     try {
       const result = await fetchLocalDirs(path)
-      setRepoBrowser({
-        open: true,
-        path: result.path,
-        parent: result.parent,
-        items: result.items,
-        selectedPath: '',
-        loading: false,
-        error: '',
+      setRepoBrowser((current) => {
+        const drives = !result.path
+          ? result.items.filter((item) => item.isDir)
+          : current.drives
+        return {
+          open: true,
+          path: result.path,
+          parent: result.parent,
+          items: result.items,
+          drives,
+          selectedPath: '',
+          loading: false,
+          error: '',
+        }
       })
     } catch (requestError) {
       setRepoBrowser((current) => ({
@@ -654,6 +665,8 @@ export function WorkspacePage() {
 
       if (dialog.type === 'advance') {
         await advanceStage(selectedTask.id, selectedStage.key)
+      } else if (dialog.type === 'reunderstand-requirement') {
+        await handleReunderstandRequirement()
       } else if (dialog.type === 'verify-pass') {
         await verifyBranch(selectedTask.id, selectedStage.branch, true, '')
       } else if (dialog.type === 'verify-reject') {
@@ -921,7 +934,7 @@ export function WorkspacePage() {
                           className="size-8 rounded-md"
                           title="重新理解"
                           aria-label="重新理解"
-                          onClick={() => void handleReunderstandRequirement()}
+                          onClick={() => openDialog('reunderstand-requirement')}
                           disabled={executeSubmitting}
                         >
                           <RotateCcw className="size-3.5" />
@@ -1535,19 +1548,25 @@ function MindfsStyleRepoPicker({
   onBind: () => void
 }) {
   const bindDisabled = !browser.selectedPath || repoSaving
+  const showingDriveRootList = !browser.path
 
   return (
     <div className="space-y-2.5">
+      <DriveSwitcher drives={browser.drives} currentPath={browser.path} onNavigate={onNavigate} />
       <PathBreadcrumb path={browser.path} onNavigate={onNavigate} />
 
       <div className="flex max-h-60 flex-col overflow-auto">
         {browser.loading ? <div className="px-2.5 py-2 text-xs text-muted-foreground">加载中...</div> : null}
         {!browser.loading && browser.error ? <div className="px-2.5 py-2 text-xs text-warning">{browser.error}</div> : null}
-        {!browser.loading && !browser.error && browser.items.length === 0 ? (
+        {!browser.loading && !browser.error && showingDriveRootList ? (
+          <div className="px-2.5 py-2 text-xs text-muted-foreground">请选择上方盘符后再进入目录。</div>
+        ) : null}
+        {!browser.loading && !browser.error && !showingDriveRootList && browser.items.length === 0 ? (
           <div className="px-2.5 py-2 text-xs text-muted-foreground">当前目录为空</div>
         ) : null}
         {!browser.loading &&
           !browser.error &&
+          !showingDriveRootList &&
           browser.items.map((item) => {
             const selected = browser.selectedPath === item.path
             return (
@@ -1591,6 +1610,44 @@ function MindfsStyleRepoPicker({
   )
 }
 
+function DriveSwitcher({
+  drives,
+  currentPath,
+  onNavigate,
+}: {
+  drives: LocalDirItem[]
+  currentPath: string
+  onNavigate: (path?: string) => void
+}) {
+  if (!drives.length) {
+    return null
+  }
+
+  const currentDrive = driveRootFromPath(currentPath)
+  return (
+    <div className="flex flex-wrap items-center gap-2">
+      {drives.map((drive) => {
+        const active = currentDrive === drive.path
+        return (
+          <button
+            key={drive.path}
+            type="button"
+            onClick={() => onNavigate(drive.path)}
+            className={cn(
+              'rounded-full border px-3 py-1.5 text-xs font-medium transition-colors',
+              active
+                ? 'border-primary/40 bg-primary/10 text-primary'
+                : 'border-border bg-background text-muted-foreground hover:text-foreground',
+            )}
+          >
+            {drive.name}
+          </button>
+        )
+      })}
+    </div>
+  )
+}
+
 function PathBreadcrumb({
   path,
   onNavigate,
@@ -1599,31 +1656,39 @@ function PathBreadcrumb({
   onNavigate: (path?: string) => void
 }) {
   const segments = splitPathSegments(path)
-  if (!segments.length) {
+  if (!path.trim()) {
     return (
-      <div className="min-h-5 text-xs text-muted-foreground">
-        本机目录
-      </div>
+      <div className="min-h-5 text-xs text-muted-foreground">请选择盘符</div>
     )
   }
 
-  const hiddenCount = Math.max(0, segments.length - 3)
-  const visibleSegments = hiddenCount > 0 ? segments.slice(-3) : segments
+  const visibleSegments = /^[A-Za-z]:\\$/.test(segments[0] ?? '') ? segments.slice(1) : segments
+  if (!visibleSegments.length) {
+    return <div className="min-h-5 text-xs text-muted-foreground">根目录</div>
+  }
+
+  const hiddenCount = Math.max(0, visibleSegments.length - 3)
+  const shownSegments = hiddenCount > 0 ? visibleSegments.slice(-3) : visibleSegments
+  const driveRoot = driveRootFromPath(path)
 
   return (
     <div className="flex min-w-0 flex-wrap items-center gap-1 text-xs">
       {hiddenCount > 0 ? (
         <>
-          <button type="button" onClick={() => onNavigate(buildPathFromSegments(segments.slice(0, hiddenCount)))} className="text-muted-foreground hover:text-foreground">
+          <button
+            type="button"
+            onClick={() => onNavigate(buildPathFromSegments(visibleSegments.slice(0, hiddenCount), driveRoot))}
+            className="text-muted-foreground hover:text-foreground"
+          >
             ...
           </button>
           <span className="text-muted-foreground">&gt;</span>
         </>
       ) : null}
-      {visibleSegments.map((segment, index) => {
+      {shownSegments.map((segment, index) => {
         const absoluteIndex = hiddenCount + index
-        const segmentPath = buildPathFromSegments(segments.slice(0, absoluteIndex + 1))
-        const isLast = index === visibleSegments.length - 1
+        const segmentPath = buildPathFromSegments(visibleSegments.slice(0, absoluteIndex + 1), driveRoot)
+        const isLast = index === shownSegments.length - 1
         return (
           <div key={`${segmentPath}-${segment}`} className="flex items-center gap-1">
             <button
@@ -1662,13 +1727,18 @@ function splitPathSegments(path: string) {
   return normalized.split('\\').filter(Boolean)
 }
 
-function buildPathFromSegments(segments: string[]) {
+function driveRootFromPath(path: string) {
+  const normalized = path.replace(/\//g, '\\').trim()
+  const match = /^[A-Za-z]:\\/.exec(normalized)
+  return match ? normalized.slice(0, 3) : ''
+}
+
+function buildPathFromSegments(segments: string[], driveRoot = '') {
+  if (driveRoot) {
+    return segments.length ? `${driveRoot}${segments.join('\\')}` : driveRoot
+  }
   if (!segments.length) {
     return undefined
-  }
-  const [first, ...rest] = segments
-  if (/^[A-Za-z]:\\$/.test(first)) {
-    return rest.length ? `${first}${rest.join('\\')}` : first
   }
   return `\\${segments.join('\\')}`
 }
@@ -2742,6 +2812,17 @@ function canTaskTestingNeedAction(task: TaskView, testingStage: StageView, curre
 }
 
 function getDialogConfig(type: ActionType, stage: StageView) {
+  if (type === 'reunderstand-requirement') {
+    return {
+      title: '重新理解需求',
+      description: '会带着已确认的问题澄清重新执行需求理解，并覆盖当前结果。',
+      noteLabel: '附加提示词',
+      notePlaceholder: '补充本轮重新理解需要重点关注的背景、边界或约束。',
+      confirmLabel: '确认重新理解',
+      confirmVariant: 'default' as const,
+    }
+  }
+
   if (type === 'advance') {
     return {
       title: stage.key === 'design' ? '确认设计' : '通过并推进',
@@ -3088,9 +3169,9 @@ function stageAgentSettingKey(taskId: string, stage: StageView, agentId: AgentOp
 function defaultAgentForStage(stage: StageView | null, agents: AgentStatus[]): AgentOptionId {
   const preferred =
     stage?.key === 'requirement'
-      ? 'gemini'
+      ? 'copilot'
       : stage?.key === 'design'
-        ? 'claude'
+        ? 'copilot'
         : stage?.key === 'development'
           ? 'codex'
           : stage?.key === 'review' || stage?.key === 'verification'

@@ -7,6 +7,7 @@ import { listDetectedAgents, type AgentStatus } from './agent-probe.js'
 import { createDatabase, withTransaction } from './db.js'
 import { ensureMockUsers, seedIfEmpty } from './seed.js'
 import { buildDesignArtifact, DESIGN_STAGE_SUMMARY, generateExecution, type ProcessEvent } from './executor.js'
+import { runCopilotDesign, runCopilotRequirement } from './real-agent.js'
 import {
   STAGE_DEFINITIONS,
   branchLabel,
@@ -87,6 +88,14 @@ export interface LocalDirsView {
   items: LocalDirItem[]
 }
 
+export interface StageExecutionOptions {
+  prompt?: string
+  agentName?: string
+  modelId?: string
+  effort?: string
+  fastMode?: 'on' | 'off'
+}
+
 export interface TaskView {
   id: string
   title: string
@@ -149,6 +158,27 @@ interface StageRow {
   pending_note: string
   active_run_id: string | null
   updated_at: string
+}
+
+interface StageRunRow {
+  id: string
+  task_id: string
+  stage_key: string
+  branch: string
+  run_index: number
+  status: string
+  executor_id: string
+  agent_name: string
+  model_id: string
+  effort: string
+  fast_mode: string
+  extra_prompt: string
+  process_json: string
+  artifact_json: string
+  error_message: string
+  reveal_interval_ms: number
+  started_at: string
+  finished_at: string | null
 }
 
 function toOwners(row: TaskRow) {
@@ -426,6 +456,58 @@ export class WorkflowService {
 
   listAgents(): AgentStatus[] {
     return listDetectedAgents()
+  }
+
+  private getStageRunRow(runId: string) {
+    const row = this.db.prepare('SELECT * FROM stage_runs WHERE id = ?').get(runId) as StageRunRow | undefined
+    if (!row) {
+      throw new Error('执行记录不存在')
+    }
+    return row
+  }
+
+  private parseProcessJson(value: string) {
+    try {
+      const parsed = JSON.parse(value) as unknown
+      return Array.isArray(parsed) ? (parsed as ProcessEvent[]) : []
+    } catch {
+      return []
+    }
+  }
+
+  private appendRunProcessEvents(runId: string, events: ProcessEvent[]) {
+    const run = this.getStageRunRow(runId)
+    const existing = this.parseProcessJson(run.process_json)
+    const normalized = events.map((event, index) => ({ ...event, order: existing.length + index }))
+    const next = [...existing, ...normalized]
+    this.db.prepare('UPDATE stage_runs SET process_json = ? WHERE id = ?').run(JSON.stringify(next), runId)
+  }
+
+  private trimStageRunHistory(taskId: string, key: StageKey, branch: Branch, keep = 10) {
+    const rows = this.db
+      .prepare('SELECT id FROM stage_runs WHERE task_id = ? AND stage_key = ? AND branch = ? ORDER BY run_index DESC, started_at DESC')
+      .all(taskId, key, branch) as unknown as Array<{ id: string }>
+    rows.slice(keep).forEach((row) => {
+      this.db.prepare('DELETE FROM stage_runs WHERE id = ?').run(row.id)
+      this.runProcesses.delete(row.id)
+    })
+  }
+
+  private resolveRealAgentSelection(options?: StageExecutionOptions) {
+    const agentName = options?.agentName?.trim() || 'copilot'
+    if (agentName !== 'copilot') {
+      throw new Error('第一批真实执行仅支持 copilot')
+    }
+    const agent = this.listAgents().find((item) => item.name === agentName)
+    if (!agent?.installed || !agent.available) {
+      throw new Error(agent?.error?.trim() || '所选 agent 当前不可用')
+    }
+    return {
+      agentName,
+      modelId: options?.modelId?.trim() || agent.default_model_id || agent.current_model_id || '',
+      effort: options?.effort?.trim() || agent.default_effort || '',
+      fastMode: options?.fastMode === 'on' ? 'on' : 'off',
+    }
   }
 
   listLocalDirs(path?: string): LocalDirsView {
@@ -803,6 +885,142 @@ export class WorkflowService {
     return this.getTaskView(taskId, actor)
   }
 
+  private startRealStageExecution(
+    task: TaskRow,
+    stage: StageRow,
+    actor: User,
+    options?: StageExecutionOptions,
+  ) {
+    const key = stage.stage_key as StageKey
+    const branch = stage.branch as Branch
+    const effectivePrompt = options?.prompt === undefined ? stage.extra_prompt : options.prompt.trim()
+    const selected = this.resolveRealAgentSelection(options)
+    const now = nowIso()
+    const runId = crypto.randomUUID()
+    const runIndex = stage.run_count + 1
+    const initialEvents: ProcessEvent[] = [
+      { order: 0, type: 'thought', title: '准备执行', content: '已创建真实 agent 后台任务。' },
+      { order: 1, type: 'tool', title: selected.agentName, content: `将使用 ${selected.modelId || '默认模型'} 执行。`, tool: { name: selected.agentName, status: 'complete', detail: selected.effort || 'default' } },
+    ]
+
+    withTransaction(this.db, () => {
+      if (task.state === 'pending') {
+        this.db.prepare('UPDATE tasks SET state = ? WHERE id = ?').run('in_progress', task.id)
+      }
+      this.db
+        .prepare(
+          `INSERT INTO stage_runs (
+            id, task_id, stage_key, branch, run_index, status, executor_id, agent_name, model_id, effort, fast_mode, extra_prompt, process_json, artifact_json, error_message, reveal_interval_ms, started_at, finished_at
+          ) VALUES (?, ?, ?, ?, ?, 'running', ?, ?, ?, ?, ?, ?, ?, '', '', 0, ?, NULL)`,
+        )
+        .run(
+          runId,
+          task.id,
+          key,
+          branch,
+          runIndex,
+          actor.id,
+          selected.agentName,
+          selected.modelId,
+          selected.effort,
+          selected.fastMode,
+          effectivePrompt,
+          JSON.stringify(initialEvents),
+          now,
+        )
+
+      this.db
+        .prepare('UPDATE task_stages SET status = ?, run_count = ?, active_run_id = ?, extra_prompt = ?, pending_note = ?, updated_at = ? WHERE task_id = ? AND stage_key = ? AND branch = ?')
+        .run('running', runIndex, runId, effectivePrompt, '', now, task.id, key, branch)
+      this.touchTask(task.id)
+      this.addTimeline(task.id, 'executing', `${stageDisplayName(key, branch)} 开始真实执行`, selected.agentName, actor.id, key, branch)
+    })
+
+    void this.runRealStageExecution(task, stage, actor, runId, effectivePrompt)
+    return this.getTaskView(task.id, actor)
+  }
+
+  private async runRealStageExecution(
+    task: TaskRow,
+    stage: StageRow,
+    actor: User,
+    runId: string,
+    effectivePrompt: string,
+  ) {
+    const key = stage.stage_key as StageKey
+    const branch = stage.branch as Branch
+    try {
+      const run = this.getStageRunRow(runId)
+      const result = await (
+        key === 'requirement'
+          ? runCopilotRequirement(
+              {
+                title: task.title,
+                description: task.description,
+                extraPrompt: effectivePrompt,
+              },
+              { modelId: run.model_id, effort: run.effort },
+            )
+          : runCopilotDesign(
+              {
+                title: task.title,
+                description: task.description,
+                requirementDoc: this.requirementDocForDesign(task.id),
+                extraPrompt: effectivePrompt,
+              },
+              { modelId: run.model_id, effort: run.effort },
+            )
+      )
+
+      this.appendRunProcessEvents(runId, result.process)
+
+      withTransaction(this.db, () => {
+        this.db
+          .prepare('UPDATE stage_runs SET status = ?, artifact_json = ?, error_message = ?, finished_at = ? WHERE id = ?')
+          .run('complete', JSON.stringify({ ...result.artifact, summary: result.summary }), '', nowIso(), runId)
+        this.db
+          .prepare('UPDATE task_stages SET status = ?, summary = ?, artifact_json = ?, pending_note = ?, active_run_id = NULL, updated_at = ? WHERE task_id = ? AND stage_key = ? AND branch = ?')
+          .run(
+            'review',
+            result.summary,
+            JSON.stringify(result.artifact),
+            key === 'design' ? this.designConfirmationNote({ frontend: false, backend: false }) : '',
+            nowIso(),
+            task.id,
+            key,
+            branch,
+          )
+        if (key === 'requirement') {
+          this.replaceClarifications(task.id, result.clarifications ?? [])
+        }
+        this.touchTask(task.id)
+        this.addTimeline(task.id, 'stage', `${stageDisplayName(key, branch)} 真实执行完成`, '', actor.id, key, branch)
+      })
+      this.trimStageRunHistory(task.id, key, branch)
+    } catch (error) {
+      const message = (error as Error).message || '真实 agent 执行失败'
+      this.appendRunProcessEvents(runId, [{ order: this.parseProcessJson(this.getStageRunRow(runId).process_json).length, type: 'text', title: '执行失败', content: message }])
+      withTransaction(this.db, () => {
+        this.db.prepare('UPDATE stage_runs SET status = ?, error_message = ?, finished_at = ? WHERE id = ?').run('failed', message, nowIso(), runId)
+        this.db
+          .prepare('UPDATE task_stages SET status = ?, active_run_id = NULL, pending_note = ?, updated_at = ? WHERE task_id = ? AND stage_key = ? AND branch = ?')
+          .run('pending', `执行失败：${message}`, nowIso(), task.id, key, branch)
+        this.touchTask(task.id)
+        this.addTimeline(task.id, 'stage', `${stageDisplayName(key, branch)} 执行失败`, message, actor.id, key, branch)
+      })
+      this.trimStageRunHistory(task.id, key, branch)
+    }
+  }
+
+  private requirementDocForDesign(taskId: string) {
+    const stage = this.getStageRow(taskId, 'requirement', 'shared')
+    const artifact = parseArtifact(stage.artifact_json)
+    if (artifact && typeof artifact.fullDoc === 'string' && artifact.fullDoc.trim()) {
+      return artifact.fullDoc.trim()
+    }
+    return stage.summary || ''
+  }
+
   bindRepo(taskId: string, branch: Branch, repoPath: string, actor: User): TaskView {
     const task = this.getTaskRow(taskId)
     const expectedActorId = branch === 'frontend' ? task.frontend_dev_id : task.backend_dev_id
@@ -844,9 +1062,9 @@ export class WorkflowService {
     return this.getTaskView(taskId, actor)
   }
 
-  // Run the mock agent for a stage: produces execution-process timeline + artifact,
-  // then puts the stage into 'review' (agent-executed stages await human action).
-  executeStage(taskId: string, key: StageKey, branch: Branch, actor: User, prompt?: string): TaskView {
+  // Execute a stage, using real background execution for requirement/design and
+  // the existing mock path for the remaining agent-driven stages.
+  executeStage(taskId: string, key: StageKey, branch: Branch, actor: User, options?: StageExecutionOptions): TaskView {
     const task = this.getTaskRow(taskId)
     const stage = this.getStageRow(taskId, key, branch)
     const def = getStageDefinition(key)
@@ -866,7 +1084,11 @@ export class WorkflowService {
       }
     }
 
-    const effectivePrompt = prompt === undefined ? stage.extra_prompt : prompt.trim()
+    if (key === 'requirement' || key === 'design') {
+      return this.startRealStageExecution(task, stage, actor, options)
+    }
+
+    const effectivePrompt = options?.prompt === undefined ? stage.extra_prompt : options.prompt.trim()
     const result = generateExecution(key, branch, task.title, effectivePrompt, stage.pending_note)
     const artifactWithSummary = { ...result.artifact, summary: result.summary }
     const now = nowIso()
@@ -902,10 +1124,6 @@ export class WorkflowService {
           'UPDATE task_stages SET status = ?, run_count = ?, active_run_id = ?, extra_prompt = ?, pending_note = ?, updated_at = ? WHERE task_id = ? AND stage_key = ? AND branch = ?',
         )
         .run('running', runIndex, runId, effectivePrompt, '', now, taskId, key, branch)
-
-      if (key === 'requirement') {
-        this.seedClarifications(taskId, result.clarifications ?? [])
-      }
 
       this.touchTask(taskId)
       this.addTimeline(taskId, 'executing', `${stageDisplayName(key, branch)} 开始执行`, '', actor.id, key, branch)
@@ -1084,20 +1302,18 @@ export class WorkflowService {
     if (!stage.active_run_id || stage.status !== 'running') {
       return { events: [], executorId: null, running: false }
     }
-    const run = this.db.prepare('SELECT * FROM stage_runs WHERE id = ?').get(stage.active_run_id) as
-      | { id: string; executor_id: string; status: string; reveal_interval_ms: number; started_at: string }
-      | undefined
+    const run = this.db.prepare('SELECT * FROM stage_runs WHERE id = ?').get(stage.active_run_id) as StageRunRow | undefined
     if (!run) {
       return { events: [], executorId: null, running: false }
-    }
-    const all = this.runProcesses.get(run.id)
-    if (!all) {
-      return { events: [], executorId: run.executor_id, running: false }
     }
     // Only the current executor sees process content, and only while the stage is running.
     const visible = run.executor_id === viewer.id && stage.status === 'running'
     if (!visible) {
       return { events: [], executorId: run.executor_id, running: false }
+    }
+    const all = this.runProcesses.get(run.id)
+    if (!all) {
+      return { events: this.parseProcessJson(run.process_json), executorId: run.executor_id, running: run.status === 'running' }
     }
     const info = this.revealInfo(run.started_at, run.reveal_interval_ms, all.length)
     return { events: all.slice(0, info.revealed), executorId: run.executor_id, running: true }
@@ -1123,7 +1339,7 @@ export class WorkflowService {
     return this.getTaskView(taskId, actor)
   }
 
-  reunderstandRequirement(taskId: string, actor: User): TaskView {
+  reunderstandRequirement(taskId: string, actor: User, prompt?: string): TaskView {
     const task = this.getTaskRow(taskId)
     this.assertRequirementExecutor(task, actor)
     const stage = this.getStageRow(taskId, 'requirement', 'shared')
@@ -1132,7 +1348,8 @@ export class WorkflowService {
     }
 
     const confirmed = this.confirmedClarifications(taskId)
-    const effectivePrompt = this.buildRequirementReunderstandPrompt(stage.extra_prompt, confirmed)
+    const basePrompt = prompt === undefined ? stage.extra_prompt : prompt.trim()
+    const effectivePrompt = this.buildRequirementReunderstandPrompt(basePrompt, confirmed)
     const result = generateExecution('requirement', 'shared', task.title, effectivePrompt, '')
     const artifactWithSummary = { ...result.artifact, summary: result.summary } as Record<string, unknown>
     if (confirmed.length) {
@@ -1168,9 +1385,9 @@ export class WorkflowService {
 
       this.db
         .prepare(
-          'UPDATE task_stages SET status = ?, run_count = ?, active_run_id = ?, pending_note = ?, updated_at = ? WHERE task_id = ? AND stage_key = ? AND branch = ?',
+          'UPDATE task_stages SET status = ?, run_count = ?, active_run_id = ?, extra_prompt = ?, pending_note = ?, updated_at = ? WHERE task_id = ? AND stage_key = ? AND branch = ?',
         )
-        .run('running', runIndex, runId, '', now, taskId, 'requirement', 'shared')
+        .run('running', runIndex, runId, basePrompt, '', now, taskId, 'requirement', 'shared')
 
       this.replaceClarifications(taskId, result.clarifications ?? [])
       this.touchTask(taskId)

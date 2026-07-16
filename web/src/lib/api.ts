@@ -5,6 +5,7 @@ import type {
   CreateTaskInput,
   LocalDirsResponse,
   ProcessResponse,
+  StageExecutionOptions,
   StageKey,
   TaskView,
   User,
@@ -90,8 +91,8 @@ export async function saveExtraPrompt(taskId: string, key: StageKey, branch: Bra
   return payload.task
 }
 
-export async function executeStage(taskId: string, key: StageKey, branch: Branch, prompt?: string): Promise<TaskView> {
-  const payload = await post<{ task: TaskView }>(`/tasks/${taskId}/stages/${key}/${branch}/execute`, prompt === undefined ? undefined : { prompt })
+export async function executeStage(taskId: string, key: StageKey, branch: Branch, options?: StageExecutionOptions): Promise<TaskView> {
+  const payload = await post<{ task: TaskView }>(`/tasks/${taskId}/stages/${key}/${branch}/execute`, options)
   return payload.task
 }
 
@@ -114,8 +115,11 @@ export async function answerClarification(taskId: string, clarificationId: strin
   return payload.task
 }
 
-export async function reunderstandRequirement(taskId: string): Promise<TaskView> {
-  const payload = await post<{ task: TaskView }>(`/tasks/${taskId}/stages/requirement/reunderstand`)
+export async function reunderstandRequirement(taskId: string, prompt?: string): Promise<TaskView> {
+  const payload = await post<{ task: TaskView }>(
+    `/tasks/${taskId}/stages/requirement/reunderstand`,
+    prompt === undefined ? undefined : { prompt },
+  )
   return payload.task
 }
 

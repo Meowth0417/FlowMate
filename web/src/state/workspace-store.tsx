@@ -23,7 +23,7 @@ import {
   verifyBranch as verifyBranchRequest,
 } from '@/lib/api'
 import { WorkspaceStoreContext, type WorkspaceStoreValue } from '@/state/workspace-store-context'
-import type { Branch, BugTarget, CreateTaskInput, StageKey, TaskView, User } from '@/lib/types'
+import type { Branch, BugTarget, CreateTaskInput, StageExecutionOptions, StageKey, TaskView, User } from '@/lib/types'
 
 const STORAGE_KEY = 'flowmate.currentUserId'
 
@@ -225,10 +225,13 @@ export function WorkspaceStoreProvider({ children }: { children: ReactNode }) {
     [wrap],
   )
   const executeStage = useMemo(
-    () => wrap((taskId: string, key: StageKey, branch: Branch, prompt?: string) => executeStageRequest(taskId, key, branch, prompt)),
+    () => wrap((taskId: string, key: StageKey, branch: Branch, options?: StageExecutionOptions) => executeStageRequest(taskId, key, branch, options)),
     [wrap],
   )
-  const reunderstandRequirement = useMemo(() => wrap((taskId: string) => reunderstandRequirementRequest(taskId)), [wrap])
+  const reunderstandRequirement = useMemo(
+    () => wrap((taskId: string, prompt?: string) => reunderstandRequirementRequest(taskId, prompt)),
+    [wrap],
+  )
   const advanceStage = useMemo(() => wrap((taskId: string, key: StageKey) => advanceStageRequest(taskId, key)), [wrap])
   const bindRepo = useMemo(
     () => wrap((taskId: string, branch: Branch, path: string) => bindRepoRequest(taskId, branch, path)),

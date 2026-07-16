@@ -58,9 +58,14 @@ export function createDatabase() {
       run_index INTEGER NOT NULL,
       status TEXT NOT NULL,
       executor_id TEXT NOT NULL,
+      agent_name TEXT NOT NULL DEFAULT '',
+      model_id TEXT NOT NULL DEFAULT '',
+      effort TEXT NOT NULL DEFAULT '',
+      fast_mode TEXT NOT NULL DEFAULT '',
       extra_prompt TEXT NOT NULL DEFAULT '',
       process_json TEXT NOT NULL,
       artifact_json TEXT NOT NULL DEFAULT '',
+      error_message TEXT NOT NULL DEFAULT '',
       reveal_interval_ms INTEGER NOT NULL DEFAULT 700,
       started_at TEXT NOT NULL,
       finished_at TEXT,
@@ -129,6 +134,11 @@ export function createDatabase() {
     CREATE INDEX IF NOT EXISTS idx_testing_bugs_task ON testing_bugs(task_id, seq DESC);
   `)
   ensureColumn(database, 'tasks', 'tester_id', "TEXT NOT NULL DEFAULT ''")
+  ensureColumn(database, 'stage_runs', 'agent_name', "TEXT NOT NULL DEFAULT ''")
+  ensureColumn(database, 'stage_runs', 'model_id', "TEXT NOT NULL DEFAULT ''")
+  ensureColumn(database, 'stage_runs', 'effort', "TEXT NOT NULL DEFAULT ''")
+  ensureColumn(database, 'stage_runs', 'fast_mode', "TEXT NOT NULL DEFAULT ''")
+  ensureColumn(database, 'stage_runs', 'error_message', "TEXT NOT NULL DEFAULT ''")
   return database
 }
 

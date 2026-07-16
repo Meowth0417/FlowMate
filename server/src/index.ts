@@ -143,9 +143,9 @@ app.post('/api/tasks/:taskId/stages/:stageKey/:branch/prompt', async (request, r
 
 app.post('/api/tasks/:taskId/stages/:stageKey/:branch/execute', async (request, reply) => {
   const { taskId, stageKey, branch } = stageParams(request)
-  const body = request.body as { prompt?: string } | undefined
+  const body = request.body as { prompt?: string; agentName?: string; modelId?: string; effort?: string; fastMode?: 'on' | 'off' } | undefined
   try {
-    return { task: service.executeStage(taskId, stageKey, branch, currentUser(request), body?.prompt) }
+    return { task: service.executeStage(taskId, stageKey, branch, currentUser(request), body) }
   } catch (error) {
     return handleError(reply, error)
   }
@@ -202,8 +202,9 @@ app.post('/api/tasks/:taskId/clarifications/:clarificationId', async (request, r
 
 app.post('/api/tasks/:taskId/stages/requirement/reunderstand', async (request, reply) => {
   const { taskId } = request.params as { taskId: string }
+  const body = request.body as { prompt?: string } | undefined
   try {
-    return { task: service.reunderstandRequirement(taskId, currentUser(request)) }
+    return { task: service.reunderstandRequirement(taskId, currentUser(request), body?.prompt) }
   } catch (error) {
     return handleError(reply, error)
   }

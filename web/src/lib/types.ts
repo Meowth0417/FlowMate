@@ -156,6 +156,14 @@ export interface ProcessResponse {
   running: boolean
 }
 
+export interface StageExecutionOptions {
+  prompt?: string
+  agentName?: string
+  modelId?: string
+  effort?: string
+  fastMode?: 'on' | 'off'
+}
+
 export interface CreateTaskInput {
   title: string
   description: string
