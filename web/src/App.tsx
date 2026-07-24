@@ -2,6 +2,7 @@ import type { ReactNode } from 'react'
 import { Navigate, Route, Routes } from 'react-router-dom'
 import { CreateTaskPage } from '@/pages/create-task-page'
 import { LoginPage } from '@/pages/login-page'
+import { ProjectManagementPage } from '@/pages/project-management-page'
 import { WorkspacePage } from '@/pages/workspace-page'
 import { WorkspaceStoreProvider } from '@/state/workspace-store'
 import { useWorkspaceStore } from '@/state/workspace-store-context'
@@ -35,6 +36,14 @@ function App() {
           element={
             <RequireAuth>
               <CreateTaskPage />
+            </RequireAuth>
+          }
+        />
+        <Route
+          path="/projects"
+          element={
+            <RequireAuth>
+              <ProjectManagementPage />
             </RequireAuth>
           }
         />

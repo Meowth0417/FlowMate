@@ -19,6 +19,7 @@ interface SeedTask {
   id: string
   title: string
   description: string
+  projectId: string
   creatorId: string
   reqOwnerId: string
   pmId: string
@@ -45,6 +46,7 @@ function stageInstances() {
 
 export function seedIfEmpty(database: DatabaseSync) {
   ensureMockUsers(database)
+  ensureSeedProjects(database)
   const row = database.prepare('SELECT COUNT(*) as count FROM tasks').get() as { count: number }
   if (row.count > 0) {
     return
@@ -54,6 +56,7 @@ export function seedIfEmpty(database: DatabaseSync) {
     const tasks: SeedTask[] = [
       {
         id: 't-demo-1',
+        projectId: 'p-default',
         title: '优惠券规则引擎',
         description: '支持按用户分层配置优惠券发放规则，并在下单时实时计算最优券。',
         creatorId: 'u-dev-1',
@@ -67,6 +70,7 @@ export function seedIfEmpty(database: DatabaseSync) {
       },
       {
         id: 't-demo-2',
+        projectId: 'p-default',
         title: '会员权益中心改版',
         description: '重构会员权益展示与领取流程，统一权益数据模型。',
         creatorId: 'u-dev-2',
@@ -83,6 +87,7 @@ export function seedIfEmpty(database: DatabaseSync) {
       },
       {
         id: 't-demo-3',
+        projectId: 'p-default',
         title: '支付审批流',
         description: '为大额支付增加多级审批流程，支持审批留痕与驳回。',
         creatorId: 'u-dev-3',
@@ -116,19 +121,27 @@ export function ensureMockUsers(database: DatabaseSync) {
   })
 }
 
+function ensureSeedProjects(database: DatabaseSync) {
+  const now = nowIso()
+  database
+    .prepare('INSERT OR IGNORE INTO projects (id, name, description, created_at, updated_at) VALUES (?, ?, ?, ?, ?)')
+    .run('p-default', '默认项目', '历史任务自动迁移的默认项目。', now, now)
+}
+
 function insertSeedTask(database: DatabaseSync, task: SeedTask) {
   const now = nowIso()
   database
     .prepare(
       `INSERT INTO tasks (
-        id, title, description, state, creator_id, req_owner_id, pm_id, frontend_dev_id, backend_dev_id,
+        id, title, description, project_id, state, creator_id, req_owner_id, pm_id, frontend_dev_id, backend_dev_id,
         tester_id, frontend_repo, backend_repo, created_at, updated_at
-      ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+      ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
     )
     .run(
       task.id,
       task.title,
       task.description,
+      task.projectId,
       task.state,
       task.creatorId,
       task.reqOwnerId,
@@ -178,7 +191,7 @@ function insertSeedTask(database: DatabaseSync, task: SeedTask) {
 
 // First stage starts pending; everything after is blocked until upstream passes.
 function defaultStatus(key: StageKey): string {
-  return key === 'requirement' ? 'pending' : 'blocked'
+  return key === 'projectContext' ? 'passed' : key === 'requirement' ? 'pending' : 'blocked'
 }
 
 function seedArtifact(key: StageKey, branch: Branch, title: string): string {

@@ -12,6 +12,8 @@ import { useWorkspaceStore } from '@/state/workspace-store-context'
 interface FormState {
   title: string
   description: string
+  projectId: string
+  refreshProjectContext: boolean
   reqOwnerId: string
   pmId: string
   frontendDevId: string
@@ -22,6 +24,8 @@ interface FormState {
 const initialForm: FormState = {
   title: '',
   description: '',
+  projectId: '',
+  refreshProjectContext: false,
   reqOwnerId: '',
   pmId: '',
   frontendDevId: '',
@@ -31,7 +35,7 @@ const initialForm: FormState = {
 
 export function CreateTaskPage() {
   const navigate = useNavigate()
-  const { createTask, users, currentUser } = useWorkspaceStore()
+  const { createTask, users, currentUser, projects } = useWorkspaceStore()
   const [form, setForm] = useState<FormState>(initialForm)
   const [errors, setErrors] = useState<Partial<Record<keyof FormState, string>>>({})
   const [feedback, setFeedback] = useState('')
@@ -45,6 +49,7 @@ export function CreateTaskPage() {
   useEffect(() => {
     setForm((prev) => ({
       ...prev,
+      projectId: prev.projectId || projects[0]?.id || '',
       reqOwnerId: prev.reqOwnerId || currentUser?.id || '',
       pmId: prev.pmId || pmOptions[0]?.id || '',
       frontendDevId: prev.frontendDevId || devOptions[0]?.id || '',
@@ -52,7 +57,7 @@ export function CreateTaskPage() {
       testerId: prev.testerId || testerOptions[0]?.id || '',
     }))
     // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [users, currentUser])
+  }, [users, currentUser, projects])
 
   function updateField<K extends keyof FormState>(key: K, value: FormState[K]) {
     setForm((prev) => ({ ...prev, [key]: value }))
@@ -71,6 +76,9 @@ export function CreateTaskPage() {
       nextErrors.description = '请填写需求描述'
     }
 
+    if (!form.projectId) {
+      nextErrors.projectId = '请选择项目'
+    }
     if (!form.reqOwnerId) {
       nextErrors.reqOwnerId = '请选择需求负责人'
     }
@@ -101,6 +109,8 @@ export function CreateTaskPage() {
       await createTask({
         title: form.title.trim(),
         description: form.description.trim(),
+        projectId: form.projectId,
+        refreshProjectContext: form.refreshProjectContext,
         reqOwnerId: form.reqOwnerId,
         pmId: form.pmId,
         frontendDevId: form.frontendDevId,
@@ -162,6 +172,14 @@ export function CreateTaskPage() {
                 />
               </Field>
               <div className="grid gap-5 xl:grid-cols-2">
+                <Field label="所属项目" error={errors.projectId}>
+                  <UserSelect
+                    value={form.projectId}
+                    options={projects.map((project) => ({ id: project.id, name: project.name, role: 'observer' as const }))}
+                    placeholder="选择项目"
+                    onChange={(value) => updateField('projectId', value)}
+                  />
+                </Field>
                 <Field label="需求负责人" error={errors.reqOwnerId}>
                   <UserSelect
                     value={form.reqOwnerId}
@@ -203,6 +221,14 @@ export function CreateTaskPage() {
                   />
                 </Field>
               </div>
+              <label className="flex items-center gap-3 rounded-[18px] border border-border bg-muted/20 px-4 py-3 text-sm">
+                <input
+                  type="checkbox"
+                  checked={form.refreshProjectContext}
+                  onChange={(event) => updateField('refreshProjectContext', event.target.checked)}
+                />
+                <span>创建后先进入“项目上下文刷新”阶段</span>
+              </label>
               {feedback ? <SuccessBanner>{feedback}</SuccessBanner> : null}
             </CardContent>
           </Card>

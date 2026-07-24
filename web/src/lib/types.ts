@@ -2,7 +2,7 @@
 
 export type SystemRole = 'pm' | 'dev' | 'tester' | 'observer'
 export type Branch = 'shared' | 'frontend' | 'backend'
-export type StageKey = 'requirement' | 'design' | 'development' | 'verification' | 'review' | 'testing' | 'delivery'
+export type StageKey = 'projectContext' | 'requirement' | 'design' | 'development' | 'verification' | 'review' | 'testing' | 'delivery'
 export type StageStatus = 'blocked' | 'pending' | 'running' | 'review' | 'passed'
 export type BugTarget = 'frontend' | 'backend' | 'both'
 export type BugStatus = 'open' | 'fixed' | 'closed'
@@ -162,11 +162,59 @@ export interface StageExecutionOptions {
   modelId?: string
   effort?: string
   fastMode?: 'on' | 'off'
+  workspacePath?: string
+}
+
+export type ProjectMemoryScope = 'shared' | 'frontend' | 'backend'
+export type ProjectMemoryPriority = 'high' | 'medium' | 'low'
+export type ProjectMemoryStatus = 'draft' | 'confirmed' | 'deprecated'
+export type ProjectMemoryStageScope = 'projectContext' | 'requirement' | 'design' | 'development' | 'review' | 'testing' | 'delivery' | 'all'
+export type ProjectSnapshotStatus = 'draft' | 'active' | 'archived'
+export type ProjectSnapshotTriggerType = 'initial-scan' | 'rescan' | 'task-delivery' | 'manual-update'
+
+export interface ProjectMemoryItemView {
+  id: string
+  category: string
+  title: string
+  content: string
+  structuredData: unknown
+  scope: ProjectMemoryScope
+  stageScope: ProjectMemoryStageScope
+  priority: ProjectMemoryPriority
+  status: ProjectMemoryStatus
+  sourceType: string
+  sourceRef: string
+  createdAt: string
+  updatedAt: string
+}
+
+export interface ProjectSnapshotView {
+  id: string
+  version: number
+  status: ProjectSnapshotStatus
+  summary: string
+  basedOnSnapshotId: string | null
+  triggerType: ProjectSnapshotTriggerType
+  createdAt: string
+  updatedAt: string
+  items: ProjectMemoryItemView[]
+}
+
+export interface ProjectView {
+  id: string
+  name: string
+  description: string
+  activeSnapshot: ProjectSnapshotView | null
+  draftSnapshot: ProjectSnapshotView | null
+  createdAt: string
+  updatedAt: string
 }
 
 export interface CreateTaskInput {
   title: string
   description: string
+  projectId: string
+  refreshProjectContext: boolean
   reqOwnerId: string
   pmId: string
   frontendDevId: string

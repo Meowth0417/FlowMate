@@ -20,6 +20,7 @@ export function createDatabase() {
       id TEXT PRIMARY KEY,
       title TEXT NOT NULL,
       description TEXT NOT NULL,
+      project_id TEXT NOT NULL DEFAULT '',
       state TEXT NOT NULL,
       creator_id TEXT NOT NULL,
       req_owner_id TEXT NOT NULL,
@@ -30,7 +31,49 @@ export function createDatabase() {
       frontend_repo TEXT NOT NULL DEFAULT '',
       backend_repo TEXT NOT NULL DEFAULT '',
       created_at TEXT NOT NULL,
+      updated_at TEXT NOT NULL,
+      FOREIGN KEY (project_id) REFERENCES projects(id)
+    );
+
+    CREATE TABLE IF NOT EXISTS projects (
+      id TEXT PRIMARY KEY,
+      name TEXT NOT NULL,
+      description TEXT NOT NULL DEFAULT '',
+      created_at TEXT NOT NULL,
       updated_at TEXT NOT NULL
+    );
+
+    CREATE TABLE IF NOT EXISTS project_memory_snapshots (
+      id TEXT PRIMARY KEY,
+      project_id TEXT NOT NULL,
+      version INTEGER NOT NULL,
+      status TEXT NOT NULL,
+      summary TEXT NOT NULL DEFAULT '',
+      based_on_snapshot_id TEXT,
+      trigger_type TEXT NOT NULL,
+      created_at TEXT NOT NULL,
+      updated_at TEXT NOT NULL,
+      FOREIGN KEY (project_id) REFERENCES projects(id) ON DELETE CASCADE
+    );
+
+    CREATE TABLE IF NOT EXISTS project_memory_items (
+      id TEXT PRIMARY KEY,
+      project_id TEXT NOT NULL,
+      snapshot_id TEXT NOT NULL,
+      category TEXT NOT NULL,
+      title TEXT NOT NULL,
+      content TEXT NOT NULL,
+      structured_data TEXT NOT NULL DEFAULT '',
+      scope TEXT NOT NULL,
+      stage_scope TEXT NOT NULL,
+      priority TEXT NOT NULL,
+      status TEXT NOT NULL,
+      source_type TEXT NOT NULL,
+      source_ref TEXT NOT NULL DEFAULT '',
+      created_at TEXT NOT NULL,
+      updated_at TEXT NOT NULL,
+      FOREIGN KEY (project_id) REFERENCES projects(id) ON DELETE CASCADE,
+      FOREIGN KEY (snapshot_id) REFERENCES project_memory_snapshots(id) ON DELETE CASCADE
     );
 
     CREATE TABLE IF NOT EXISTS task_stages (
@@ -128,17 +171,23 @@ export function createDatabase() {
       FOREIGN KEY (task_id) REFERENCES tasks(id) ON DELETE CASCADE
     );
 
-    CREATE INDEX IF NOT EXISTS idx_tasks_updated_at ON tasks(updated_at DESC);
-    CREATE INDEX IF NOT EXISTS idx_stage_runs_task ON stage_runs(task_id, stage_key, branch, run_index DESC);
-    CREATE INDEX IF NOT EXISTS idx_timeline_task ON timeline_events(task_id, created_at DESC);
-    CREATE INDEX IF NOT EXISTS idx_testing_bugs_task ON testing_bugs(task_id, seq DESC);
   `)
+  ensureColumn(database, 'tasks', 'project_id', "TEXT NOT NULL DEFAULT ''")
   ensureColumn(database, 'tasks', 'tester_id', "TEXT NOT NULL DEFAULT ''")
   ensureColumn(database, 'stage_runs', 'agent_name', "TEXT NOT NULL DEFAULT ''")
   ensureColumn(database, 'stage_runs', 'model_id', "TEXT NOT NULL DEFAULT ''")
   ensureColumn(database, 'stage_runs', 'effort', "TEXT NOT NULL DEFAULT ''")
   ensureColumn(database, 'stage_runs', 'fast_mode', "TEXT NOT NULL DEFAULT ''")
   ensureColumn(database, 'stage_runs', 'error_message', "TEXT NOT NULL DEFAULT ''")
+  database.exec(`
+    CREATE INDEX IF NOT EXISTS idx_tasks_updated_at ON tasks(updated_at DESC);
+    CREATE INDEX IF NOT EXISTS idx_tasks_project_id ON tasks(project_id);
+    CREATE INDEX IF NOT EXISTS idx_stage_runs_task ON stage_runs(task_id, stage_key, branch, run_index DESC);
+    CREATE INDEX IF NOT EXISTS idx_timeline_task ON timeline_events(task_id, created_at DESC);
+    CREATE INDEX IF NOT EXISTS idx_testing_bugs_task ON testing_bugs(task_id, seq DESC);
+    CREATE INDEX IF NOT EXISTS idx_project_snapshots_project ON project_memory_snapshots(project_id, version DESC);
+    CREATE INDEX IF NOT EXISTS idx_project_items_snapshot ON project_memory_items(snapshot_id, scope, category);
+  `)
   return database
 }
 

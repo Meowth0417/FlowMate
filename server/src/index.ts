@@ -41,6 +41,51 @@ app.get('/health', async () => ({ ok: true }))
 
 app.get('/api/users', async () => ({ users: service.listUsers() }))
 
+app.get('/api/projects', async (request, reply) => {
+  try {
+    currentUser(request)
+    return { projects: service.listProjects() }
+  } catch (error) {
+    return handleError(reply, error)
+  }
+})
+
+app.get('/api/projects/:projectId', async (request, reply) => {
+  const { projectId } = request.params as { projectId: string }
+  try {
+    currentUser(request)
+    return { project: service.getProjectView(projectId) }
+  } catch (error) {
+    return handleError(reply, error)
+  }
+})
+
+app.post('/api/projects', async (request, reply) => {
+  const body = request.body as { projectId?: string; name?: string; description?: string }
+  try {
+    currentUser(request)
+    return { project: service.saveProject({ projectId: body?.projectId, name: body?.name ?? '', description: body?.description ?? '' }) }
+  } catch (error) {
+    return handleError(reply, error)
+  }
+})
+
+app.post('/api/projects/:projectId/memory', async (request, reply) => {
+  const { projectId } = request.params as { projectId: string }
+  const body = request.body as { summary?: string; items?: unknown[] }
+  try {
+    currentUser(request)
+    return {
+      project: service.saveProjectMemory(projectId, {
+        summary: body?.summary ?? '',
+        items: Array.isArray(body?.items) ? (body.items as never[]) : [],
+      }),
+    }
+  } catch (error) {
+    return handleError(reply, error)
+  }
+})
+
 app.get('/api/agents', async (request, reply) => {
   try {
     currentUser(request)
@@ -81,6 +126,8 @@ app.post('/api/tasks', async (request, reply) => {
   const body = request.body as {
     title?: string
     description?: string
+    projectId?: string
+    refreshProjectContext?: boolean
     reqOwnerId?: string
     pmId?: string
     frontendDevId?: string
@@ -90,8 +137,8 @@ app.post('/api/tasks', async (request, reply) => {
   if (!body?.title?.trim() || !body?.description?.trim()) {
     return reply.code(400).send({ message: '标题与描述必填' })
   }
-  if (!body.reqOwnerId || !body.pmId || !body.frontendDevId || !body.backendDevId || !body.testerId) {
-    return reply.code(400).send({ message: '需求负责人、产品经理、前后端开发、测试负责人必选' })
+  if (!body.projectId || !body.reqOwnerId || !body.pmId || !body.frontendDevId || !body.backendDevId || !body.testerId) {
+    return reply.code(400).send({ message: '项目、需求负责人、产品经理、前后端开发、测试负责人必选' })
   }
   try {
     return {
@@ -99,6 +146,8 @@ app.post('/api/tasks', async (request, reply) => {
         {
           title: body.title.trim(),
           description: body.description.trim(),
+          projectId: body.projectId,
+          refreshProjectContext: Boolean(body.refreshProjectContext),
           reqOwnerId: body.reqOwnerId,
           pmId: body.pmId,
           frontendDevId: body.frontendDevId,

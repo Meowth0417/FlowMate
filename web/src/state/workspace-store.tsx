@@ -9,6 +9,7 @@ import {
   deliver as deliverRequest,
   executeStage as executeStageRequest,
   fetchTasks,
+  fetchProjects,
   fetchUsers,
   markTestingBugFixed as markTestingBugFixedRequest,
   passTesting as passTestingRequest,
@@ -17,13 +18,15 @@ import {
   reviewBranch as reviewBranchRequest,
   rollbackDelivery as rollbackDeliveryRequest,
   saveExtraPrompt as saveExtraPromptRequest,
+  saveProject as saveProjectRequest,
+  saveProjectMemory as saveProjectMemoryRequest,
   setApiUser,
   supplementDesign as supplementDesignRequest,
   supplementRequirement as supplementRequirementRequest,
   verifyBranch as verifyBranchRequest,
 } from '@/lib/api'
 import { WorkspaceStoreContext, type WorkspaceStoreValue } from '@/state/workspace-store-context'
-import type { Branch, BugTarget, CreateTaskInput, StageExecutionOptions, StageKey, TaskView, User } from '@/lib/types'
+import type { Branch, BugTarget, CreateTaskInput, ProjectMemoryItemView, ProjectView, StageExecutionOptions, StageKey, TaskView, User } from '@/lib/types'
 
 const STORAGE_KEY = 'flowmate.currentUserId'
 
@@ -113,6 +116,7 @@ export function WorkspaceStoreProvider({ children }: { children: ReactNode }) {
   const [authError, setAuthError] = useState<string | null>(null)
 
   const [tasks, setTasks] = useState<TaskView[]>([])
+  const [projects, setProjects] = useState<ProjectView[]>([])
   const [loading, setLoading] = useState(false)
   const [error, setError] = useState<string | null>(null)
   const [selectedTaskId, setSelectedTaskId] = useState('')
@@ -136,9 +140,25 @@ export function WorkspaceStoreProvider({ children }: { children: ReactNode }) {
     }
   }, [])
 
+  const refreshProjects = useCallback(async () => {
+    if (!currentUserId) {
+      setProjects([])
+      return
+    }
+    try {
+      setProjects(await fetchProjects())
+    } catch {
+      setProjects([])
+    }
+  }, [currentUserId])
+
   useEffect(() => {
     void refreshUsers()
   }, [refreshUsers])
+
+  useEffect(() => {
+    void refreshProjects()
+  }, [refreshProjects])
 
   const currentUser = useMemo(
     () => users.find((user) => user.id === currentUserId) ?? null,
@@ -207,6 +227,29 @@ export function WorkspaceStoreProvider({ children }: { children: ReactNode }) {
       return task
     },
     [mergeTask],
+  )
+
+  const saveProject = useCallback(
+    async (input: { projectId?: string; name: string; description?: string }) => {
+      const project = await saveProjectRequest(input)
+      setProjects((prev) => {
+        if (!prev.some((item) => item.id === project.id)) {
+          return [project, ...prev]
+        }
+        return prev.map((item) => (item.id === project.id ? project : item))
+      })
+      return project
+    },
+    [],
+  )
+
+  const saveProjectMemory = useCallback(
+    async (projectId: string, summary: string, items: Omit<ProjectMemoryItemView, 'id' | 'createdAt' | 'updatedAt'>[]) => {
+      const project = await saveProjectMemoryRequest(projectId, summary, items)
+      setProjects((prev) => prev.map((item) => (item.id === project.id ? project : item)))
+      return project
+    },
+    [],
   )
 
   // Each mutation returns the updated TaskView; merge it into the list.
@@ -286,13 +329,17 @@ export function WorkspaceStoreProvider({ children }: { children: ReactNode }) {
       logout,
       refreshUsers,
       tasks,
+      projects,
       loading,
       error,
       selectedTaskId,
       selectedTask,
       setSelectedTaskId,
       refreshTasks,
+      refreshProjects,
       createTask,
+      saveProject,
+      saveProjectMemory,
       cancelTask,
       saveExtraPrompt,
       executeStage,
@@ -320,12 +367,16 @@ export function WorkspaceStoreProvider({ children }: { children: ReactNode }) {
       logout,
       refreshUsers,
       tasks,
+      projects,
       loading,
       error,
       selectedTaskId,
       selectedTask,
       refreshTasks,
+      refreshProjects,
       createTask,
+      saveProject,
+      saveProjectMemory,
       cancelTask,
       saveExtraPrompt,
       executeStage,

@@ -5,6 +5,8 @@ import type {
   CreateTaskInput,
   LocalDirsResponse,
   ProcessResponse,
+  ProjectMemoryItemView,
+  ProjectView,
   StageExecutionOptions,
   StageKey,
   TaskView,
@@ -55,6 +57,21 @@ function post<T>(path: string, body?: unknown): Promise<T> {
 export async function fetchUsers(): Promise<User[]> {
   const payload = await request<{ users: User[] }>('/users')
   return payload.users
+}
+
+export async function fetchProjects(): Promise<ProjectView[]> {
+  const payload = await request<{ projects: ProjectView[] }>('/projects')
+  return payload.projects
+}
+
+export async function saveProject(input: { projectId?: string; name: string; description?: string }): Promise<ProjectView> {
+  const payload = await post<{ project: ProjectView }>('/projects', input)
+  return payload.project
+}
+
+export async function saveProjectMemory(projectId: string, summary: string, items: Omit<ProjectMemoryItemView, 'id' | 'createdAt' | 'updatedAt'>[]): Promise<ProjectView> {
+  const payload = await post<{ project: ProjectView }>(`/projects/${projectId}/memory`, { summary, items })
+  return payload.project
 }
 
 export async function fetchLocalDirs(path?: string): Promise<LocalDirsResponse> {

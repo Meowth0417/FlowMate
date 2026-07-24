@@ -1,5 +1,5 @@
 import { createContext, useContext } from 'react'
-import type { Branch, BugTarget, StageExecutionOptions, StageKey, CreateTaskInput, TaskView, User } from '@/lib/types'
+import type { Branch, BugTarget, CreateTaskInput, ProjectMemoryItemView, ProjectView, StageExecutionOptions, StageKey, TaskView, User } from '@/lib/types'
 
 export interface WorkspaceStoreValue {
   // Auth (mock identity, no password) ---------------------------------------
@@ -12,6 +12,7 @@ export interface WorkspaceStoreValue {
   refreshUsers: () => Promise<void>
 
   // Tasks -------------------------------------------------------------------
+  projects: ProjectView[]
   tasks: TaskView[]
   loading: boolean
   error: string | null
@@ -19,9 +20,12 @@ export interface WorkspaceStoreValue {
   selectedTask: TaskView | null
   setSelectedTaskId: (taskId: string) => void
   refreshTasks: () => Promise<void>
+  refreshProjects: () => Promise<void>
 
   // Mutations (mirror the V3 backend endpoints) -----------------------------
   createTask: (input: CreateTaskInput) => Promise<TaskView>
+  saveProject: (input: { projectId?: string; name: string; description?: string }) => Promise<ProjectView>
+  saveProjectMemory: (projectId: string, summary: string, items: Omit<ProjectMemoryItemView, 'id' | 'createdAt' | 'updatedAt'>[]) => Promise<ProjectView>
   cancelTask: (taskId: string) => Promise<void>
   saveExtraPrompt: (taskId: string, key: StageKey, branch: Branch, prompt: string) => Promise<void>
   executeStage: (taskId: string, key: StageKey, branch: Branch, options?: StageExecutionOptions) => Promise<void>

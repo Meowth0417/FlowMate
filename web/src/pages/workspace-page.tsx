@@ -6,6 +6,7 @@ import {
   ClipboardCheck,
   Code2,
   CircleHelp,
+  FolderGit2,
   FolderPlus,
   LogOut,
   Moon,
@@ -45,6 +46,7 @@ import { Card, CardContent, CardDescription, CardHeader, CardTitle } from '@/com
 import { Textarea } from '@/components/ui/textarea'
 
 const stageIcons: Record<StageKey, ComponentType<{ className?: string }>> = {
+  projectContext: FolderGit2,
   requirement: SearchCheck,
   design: SquareTerminal,
   development: Code2,
@@ -243,6 +245,7 @@ export function WorkspacePage() {
   const [stageAgentModels, setStageAgentModels] = useState<Record<string, string>>({})
   const [stageAgentEfforts, setStageAgentEfforts] = useState<Record<string, string>>({})
   const [stageAgentFastModes, setStageAgentFastModes] = useState<Record<string, FastMode>>({})
+  const [projectWorkspacePath, setProjectWorkspacePath] = useState('')
   const [repoBrowser, setRepoBrowser] = useState<LocalDirBrowserState>({
     open: false,
     path: '',
@@ -305,6 +308,12 @@ export function WorkspacePage() {
       return currentUser.id === selectedTask.backendDevId
     }
     return false
+  }, [currentUser, selectedStage, selectedTask])
+  const showProjectContextWorkspaceToolbar = useMemo(() => {
+    if (!selectedTask || !selectedStage || !currentUser || selectedStage.key !== 'projectContext') {
+      return false
+    }
+    return currentUser.id === selectedTask.frontendDevId || currentUser.id === selectedTask.backendDevId
   }, [currentUser, selectedStage, selectedTask])
   const selectedRepo = useMemo(() => {
     if (!selectedTask || !selectedStage) {
@@ -404,6 +413,7 @@ export function WorkspacePage() {
     setTestingBugDraft('')
     setTestingBugTarget('both')
     setTestingBugSubmitError(null)
+    setProjectWorkspacePath('')
   }, [selectedTask?.id, selectedStageKey])
 
   useEffect(() => {
@@ -517,6 +527,7 @@ export function WorkspacePage() {
         modelId: panel?.modelId || '',
         effort: panel?.effort || '',
         fastMode: panel?.fastMode || 'off',
+        workspacePath: selectedStage.key === 'projectContext' ? projectWorkspacePath : '',
       })
     } finally {
       setExecuteSubmitting(false)
@@ -575,7 +586,15 @@ export function WorkspacePage() {
   }
 
   async function handleBindSelectedDirectory() {
-    if (!selectedTask || !selectedStage || selectedStage.branch === 'shared' || !repoBrowser.selectedPath) {
+    if (!selectedTask || !selectedStage || !repoBrowser.selectedPath) {
+      return
+    }
+    if (selectedStage.key === 'projectContext') {
+      setProjectWorkspacePath(repoBrowser.selectedPath)
+      setRepoBrowser((current) => ({ ...current, open: false, error: '' }))
+      return
+    }
+    if (selectedStage.branch === 'shared') {
       return
     }
     try {
@@ -749,6 +768,17 @@ export function WorkspacePage() {
               </NavLink>
             </Button>
 
+            <Button
+              asChild
+              variant="ghost"
+              className="mt-2 h-10 w-full justify-start rounded-lg px-3.5 text-sm"
+            >
+              <NavLink to="/projects">
+                <FolderGit2 className="size-4.5" />
+                项目管理
+              </NavLink>
+            </Button>
+
             <div className="mt-4">
               <TaskListSection
                 title="待你处理"
@@ -883,8 +913,8 @@ export function WorkspacePage() {
                     {selectedStage.branch !== 'shared' ? (
                       <Badge variant="outline">{branchLabel(selectedStage.branch)}</Badge>
                     ) : null}
-                    {showDevelopmentRepoToolbar ? (
-                      selectedRepo ? (
+                    {showDevelopmentRepoToolbar || showProjectContextWorkspaceToolbar ? (
+                      showDevelopmentRepoToolbar && selectedRepo ? (
                         <div
                           className="flex shrink-0 items-center gap-1.5 rounded-full border border-border bg-card px-2.5 py-1 text-xs text-foreground"
                           title={selectedRepo.path}
@@ -897,8 +927,17 @@ export function WorkspacePage() {
                             </Badge>
                           ) : null}
                         </div>
-                      ) : canBindLocalRepo ? (
+                      ) : canBindLocalRepo || showProjectContextWorkspaceToolbar ? (
                         <div ref={repoBrowserRef} className="relative shrink-0">
+                          {showProjectContextWorkspaceToolbar && projectWorkspacePath ? (
+                            <div
+                              className="mb-2 flex shrink-0 items-center gap-1.5 rounded-full border border-border bg-card px-2.5 py-1 text-xs text-foreground"
+                              title={projectWorkspacePath}
+                            >
+                              <FolderGit2 className="size-3.5 text-muted-foreground" />
+                              <span className="max-w-48 truncate font-medium">{projectWorkspacePath}</span>
+                            </div>
+                          ) : null}
                           <Button
                             variant="outline"
                             className="h-7 shrink-0 rounded-full px-3 text-xs"
@@ -906,7 +945,7 @@ export function WorkspacePage() {
                             disabled={repoSaving}
                           >
                             <FolderPlus className="size-3.5" />
-                            {repoSaving ? '绑定中...' : '绑定仓库'}
+                            {showProjectContextWorkspaceToolbar ? '选择工作区' : repoSaving ? '绑定中...' : '绑定仓库'}
                           </Button>
 
                           {repoBrowser.open ? (
@@ -917,6 +956,7 @@ export function WorkspacePage() {
                                 onNavigate={(path) => void loadLocalDirs(path)}
                                 onSelect={handleSelectRepoPath}
                                 onBind={() => void handleBindSelectedDirectory()}
+                                bindLabel={showProjectContextWorkspaceToolbar ? '使用该工作区' : '绑定仓库'}
                               />
                             </div>
                           ) : null}
@@ -968,7 +1008,9 @@ export function WorkspacePage() {
                     </Card>
                   ) : null}
 
-                  {selectedStage.status === 'pending' && canExecuteSelectedStage && isAgentStage(selectedStage.key) ? (
+                  {(selectedStage.status === 'pending' || (selectedStage.key === 'projectContext' && selectedStage.status === 'review')) &&
+                  canExecuteSelectedStage &&
+                  isAgentStage(selectedStage.key) ? (
                     <StagePromptCard
                       stage={selectedStage}
                       promptDraft={promptDraft}
@@ -1537,12 +1579,14 @@ function AgentSectionHeader({
 function MindfsStyleRepoPicker({
   browser,
   repoSaving,
+  bindLabel,
   onSelect,
   onNavigate,
   onBind,
 }: {
   browser: LocalDirBrowserState
   repoSaving: boolean
+  bindLabel: string
   onSelect: (path: string) => void
   onNavigate: (path?: string) => void
   onBind: () => void
@@ -1604,7 +1648,7 @@ function MindfsStyleRepoPicker({
           bindDisabled ? 'cursor-not-allowed bg-primary/65' : 'bg-primary hover:opacity-90',
         )}
       >
-        {repoSaving ? '处理中...' : '绑定仓库'}
+        {repoSaving ? '处理中...' : bindLabel}
       </button>
     </div>
   )
@@ -1999,6 +2043,37 @@ function StageArtifactView({
   onMarkTestingBugFixed: (bugId: string) => void
   onCloseTestingBug: (bugId: string) => void
 }) {
+  if (stage.key === 'projectContext') {
+    const artifact = (stage.artifact && typeof stage.artifact === 'object' ? stage.artifact : {}) as {
+      summary?: string
+      items?: Array<{ scope?: string; category?: string; title?: string; content?: string }>
+    }
+
+    return (
+      <div className="space-y-3">
+        <Card className="rounded-[18px]">
+          <CardHeader>
+            <CardTitle>项目上下文快照</CardTitle>
+            <CardDescription>{artifact.summary || stage.summary || '项目上下文刷新完成后，这里会展示最新快照摘要。'}</CardDescription>
+          </CardHeader>
+          <CardContent className="space-y-3">
+            {(artifact.items ?? []).length ? (
+              artifact.items!.map((item, index) => (
+                <div key={`${item.scope ?? 'shared'}-${item.category ?? 'memory'}-${index}`} className="rounded-[18px] border border-border bg-muted/20 p-4">
+                  <div className="text-sm font-medium">{item.title || '未命名条目'}</div>
+                  <div className="mt-1 text-xs text-muted-foreground">{item.scope || 'shared'} · {item.category || 'memory'}</div>
+                  <p className="mt-2 text-sm leading-6 text-muted-foreground">{item.content || '暂无内容'}</p>
+                </div>
+              ))
+            ) : (
+              <EmptyHint>当前还没有项目记忆条目。</EmptyHint>
+            )}
+          </CardContent>
+        </Card>
+      </div>
+    )
+  }
+
   if (stage.key === 'requirement') {
     const artifact = requirementArtifact(stage.artifact)
 
@@ -2960,8 +3035,11 @@ function stageBadge(task: TaskView, stage: StageView) {
 }
 
 function isStageReachable(task: TaskView, stage: StageView) {
-  if (stage.key === 'requirement') {
+  if (stage.key === 'projectContext') {
     return true
+  }
+  if (stage.key === 'requirement') {
+    return getStageStatus(task, 'projectContext', 'shared') === 'passed'
   }
   if (stage.key === 'design') {
     return getStageStatus(task, 'requirement', 'shared') === 'passed'
@@ -3010,7 +3088,7 @@ function getDefaultStageKey(task: TaskView) {
 }
 
 function isAgentStage(key: StageKey) {
-  return key === 'requirement' || key === 'design' || key === 'development' || key === 'review'
+  return key === 'projectContext' || key === 'requirement' || key === 'design' || key === 'development' || key === 'review'
 }
 
 function formatDateTime(value: string) {
@@ -3036,6 +3114,9 @@ function stageRoleLabel(task: TaskView, stage: StageView, users: { id: string; n
   if (stage.key === 'requirement') {
     return `产品经理 · ${userName(task.pmId, users)}`
   }
+  if (stage.key === 'projectContext') {
+    return `前后端负责人 · ${userName(task.frontendDevId, users)} / ${userName(task.backendDevId, users)}`
+  }
   if (stage.key === 'design' || stage.key === 'delivery') {
     return `创建人/负责人 · ${userName(task.reqOwnerId, users)}`
   }
@@ -3054,6 +3135,9 @@ function stageRoleLabel(task: TaskView, stage: StageView, users: { id: string; n
 function stageOwnerName(task: TaskView, stage: StageView, users: { id: string; name: string }[]) {
   if (stage.key === 'requirement') {
     return userName(task.pmId, users)
+  }
+  if (stage.key === 'projectContext') {
+    return `${userName(task.frontendDevId, users)} / ${userName(task.backendDevId, users)}`
   }
   if (stage.key === 'design' || stage.key === 'delivery') {
     return userName(task.reqOwnerId, users)
@@ -3147,6 +3231,7 @@ function timelineBadgeLabel(kind: string) {
 
 function stageKeyLabel(key: string) {
   const map: Record<string, string> = {
+    projectContext: '项目上下文刷新',
     requirement: '需求理解',
     design: '详细设计',
     development: '开发',
@@ -3228,6 +3313,20 @@ function agentIssueReason(agent: AgentStatus) {
 }
 
 function getSnapshotItems(task: TaskView, stage: StageView) {
+  if (stage.key === 'projectContext') {
+    const artifact = (stage.artifact && typeof stage.artifact === 'object' ? stage.artifact : {}) as {
+      summary?: string
+      items?: unknown[]
+      refreshState?: { frontend?: boolean; backend?: boolean }
+    }
+    const refreshState = artifact.refreshState ?? {}
+    return [
+      { label: '前端刷新', value: refreshState.frontend ? '已完成' : '未完成' },
+      { label: '后端刷新', value: refreshState.backend ? '已完成' : '未完成' },
+      { label: '提炼条目', value: `${Array.isArray(artifact.items) ? artifact.items.length : 0} 条` },
+    ]
+  }
+
   if (stage.key === 'requirement') {
     const artifact = requirementArtifact(stage.artifact)
     return [

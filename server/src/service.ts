@@ -1,7 +1,7 @@
 import { execFileSync } from 'node:child_process'
-import { existsSync, readdirSync, statSync } from 'node:fs'
+import { existsSync, readFileSync, readdirSync, statSync } from 'node:fs'
 import { homedir } from 'node:os'
-import { basename, dirname, isAbsolute, resolve } from 'node:path'
+import { basename, dirname, isAbsolute, join, relative, resolve } from 'node:path'
 import type { DatabaseSync } from 'node:sqlite'
 import { listDetectedAgents, type AgentStatus } from './agent-probe.js'
 import { createDatabase, withTransaction } from './db.js'
@@ -94,12 +94,52 @@ export interface StageExecutionOptions {
   modelId?: string
   effort?: string
   fastMode?: 'on' | 'off'
+  workspacePath?: string
+}
+
+export interface ProjectMemoryItemView {
+  id: string
+  category: string
+  title: string
+  content: string
+  structuredData: unknown
+  scope: 'shared' | 'frontend' | 'backend'
+  stageScope: string
+  priority: 'high' | 'medium' | 'low'
+  status: 'draft' | 'confirmed' | 'deprecated'
+  sourceType: string
+  sourceRef: string
+  createdAt: string
+  updatedAt: string
+}
+
+export interface ProjectSnapshotView {
+  id: string
+  version: number
+  status: 'draft' | 'active' | 'archived'
+  summary: string
+  basedOnSnapshotId: string | null
+  triggerType: string
+  createdAt: string
+  updatedAt: string
+  items: ProjectMemoryItemView[]
+}
+
+export interface ProjectView {
+  id: string
+  name: string
+  description: string
+  activeSnapshot: ProjectSnapshotView | null
+  draftSnapshot: ProjectSnapshotView | null
+  createdAt: string
+  updatedAt: string
 }
 
 export interface TaskView {
   id: string
   title: string
   description: string
+  projectId: string
   state: string
   creatorId: string
   reqOwnerId: string
@@ -132,6 +172,7 @@ interface TaskRow {
   id: string
   title: string
   description: string
+  project_id: string
   state: string
   creator_id: string
   req_owner_id: string
@@ -179,6 +220,14 @@ interface StageRunRow {
   reveal_interval_ms: number
   started_at: string
   finished_at: string | null
+}
+
+interface ProjectRow {
+  id: string
+  name: string
+  description: string
+  created_at: string
+  updated_at: string
 }
 
 function toOwners(row: TaskRow) {
@@ -245,6 +294,8 @@ export class WorkflowService {
     this.db = createDatabase()
     ensureMockUsers(this.db)
     seedIfEmpty(this.db)
+    this.ensureDefaultProject()
+    this.migrateTaskProjects()
     this.normalizeTesterAssignments()
     this.normalizeStageLayout()
     this.resetEphemeralRunningStages()
@@ -292,6 +343,17 @@ export class WorkflowService {
       return
     }
     this.db.prepare("UPDATE tasks SET tester_id = ? WHERE tester_id = ''").run(defaultTester.id)
+  }
+
+  private ensureDefaultProject() {
+    const now = nowIso()
+    this.db
+      .prepare('INSERT OR IGNORE INTO projects (id, name, description, created_at, updated_at) VALUES (?, ?, ?, ?, ?)')
+      .run('p-default', '默认项目', '历史任务自动迁移的默认项目。', now, now)
+  }
+
+  private migrateTaskProjects() {
+    this.db.prepare("UPDATE tasks SET project_id = 'p-default' WHERE project_id = ''").run()
   }
 
   private normalizeStageLayout() {
@@ -454,6 +516,154 @@ export class WorkflowService {
     return this.db.prepare('SELECT id, name, role FROM users').all() as unknown as User[]
   }
 
+  listProjects(): ProjectView[] {
+    const rows = this.db.prepare('SELECT * FROM projects ORDER BY updated_at DESC, created_at DESC').all() as unknown as ProjectRow[]
+    return rows.map((row) => this.buildProjectView(row))
+  }
+
+  getProjectView(projectId: string): ProjectView {
+    return this.buildProjectView(this.getProjectRow(projectId))
+  }
+
+  saveProject(input: { projectId?: string; name: string; description?: string }): ProjectView {
+    const now = nowIso()
+    const name = input.name.trim()
+    const description = input.description?.trim() ?? ''
+    if (!name) {
+      throw new Error('项目名称不能为空')
+    }
+    const projectId = input.projectId?.trim() || `p-${crypto.randomUUID().slice(0, 8)}`
+    const existing = input.projectId ? this.getProjectRow(projectId) : null
+    if (existing) {
+      this.db.prepare('UPDATE projects SET name = ?, description = ?, updated_at = ? WHERE id = ?').run(name, description, now, projectId)
+    } else {
+      this.db.prepare('INSERT INTO projects (id, name, description, created_at, updated_at) VALUES (?, ?, ?, ?, ?)').run(projectId, name, description, now, now)
+    }
+    return this.getProjectView(projectId)
+  }
+
+  saveProjectMemory(projectId: string, input: { summary: string; items: Omit<ProjectMemoryItemView, 'id' | 'createdAt' | 'updatedAt'>[] }): ProjectView {
+    const project = this.getProjectRow(projectId)
+    const now = nowIso()
+    const active = this.db
+      .prepare("SELECT * FROM project_memory_snapshots WHERE project_id = ? AND status = 'active' ORDER BY version DESC LIMIT 1")
+      .get(projectId) as
+      | { id: string; version: number }
+      | undefined
+    const nextVersion = (active?.version ?? 0) + 1
+    const draftId = `ps-${crypto.randomUUID().slice(0, 8)}`
+    withTransaction(this.db, () => {
+      this.db.prepare("UPDATE project_memory_snapshots SET status = 'archived', updated_at = ? WHERE project_id = ? AND status = 'draft'").run(now, projectId)
+      this.db
+        .prepare(
+          'INSERT INTO project_memory_snapshots (id, project_id, version, status, summary, based_on_snapshot_id, trigger_type, created_at, updated_at) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)',
+        )
+        .run(draftId, projectId, nextVersion, 'draft', input.summary.trim(), active?.id ?? null, 'manual-update', now, now)
+      input.items.forEach((item) => {
+        this.db
+          .prepare(
+            `INSERT INTO project_memory_items (
+              id, project_id, snapshot_id, category, title, content, structured_data, scope, stage_scope, priority, status, source_type, source_ref, created_at, updated_at
+            ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+          )
+          .run(
+            crypto.randomUUID(),
+            projectId,
+            draftId,
+            item.category,
+            item.title,
+            item.content,
+            JSON.stringify(item.structuredData ?? null),
+            item.scope,
+            item.stageScope,
+            item.priority,
+            item.status,
+            item.sourceType,
+            item.sourceRef,
+            now,
+            now,
+          )
+      })
+      if (active?.id) {
+        this.db.prepare("UPDATE project_memory_snapshots SET status = 'archived', updated_at = ? WHERE id = ?").run(now, active.id)
+      }
+      this.db.prepare("UPDATE project_memory_snapshots SET status = 'active', updated_at = ? WHERE id = ?").run(now, draftId)
+      this.db.prepare('UPDATE projects SET updated_at = ? WHERE id = ?').run(now, project.id)
+    })
+    return this.getProjectView(projectId)
+  }
+
+  private buildProjectView(row: ProjectRow): ProjectView {
+    const snapshots = this.db
+      .prepare('SELECT * FROM project_memory_snapshots WHERE project_id = ? ORDER BY version DESC, created_at DESC')
+      .all(row.id) as unknown as Array<{
+      id: string
+      version: number
+      status: 'draft' | 'active' | 'archived'
+      summary: string
+      based_on_snapshot_id: string | null
+      trigger_type: string
+      created_at: string
+      updated_at: string
+    }>
+    const buildSnapshot = (snapshotId: string): ProjectSnapshotView => {
+      const snapshot = snapshots.find((item) => item.id === snapshotId)!
+      const items = this.db
+        .prepare('SELECT * FROM project_memory_items WHERE snapshot_id = ? ORDER BY scope ASC, priority DESC, created_at ASC')
+        .all(snapshotId) as unknown as Array<{
+        id: string
+        category: string
+        title: string
+        content: string
+        structured_data: string
+        scope: 'shared' | 'frontend' | 'backend'
+        stage_scope: string
+        priority: 'high' | 'medium' | 'low'
+        status: 'draft' | 'confirmed' | 'deprecated'
+        source_type: string
+        source_ref: string
+        created_at: string
+        updated_at: string
+      }>
+      return {
+        id: snapshot.id,
+        version: snapshot.version,
+        status: snapshot.status,
+        summary: snapshot.summary,
+        basedOnSnapshotId: snapshot.based_on_snapshot_id,
+        triggerType: snapshot.trigger_type,
+        createdAt: snapshot.created_at,
+        updatedAt: snapshot.updated_at,
+        items: items.map((item) => ({
+          id: item.id,
+          category: item.category,
+          title: item.title,
+          content: item.content,
+          structuredData: parseArtifact(item.structured_data),
+          scope: item.scope,
+          stageScope: item.stage_scope,
+          priority: item.priority,
+          status: item.status,
+          sourceType: item.source_type,
+          sourceRef: item.source_ref,
+          createdAt: item.created_at,
+          updatedAt: item.updated_at,
+        })),
+      }
+    }
+    const active = snapshots.find((item) => item.status === 'active')
+    const draft = snapshots.find((item) => item.status === 'draft')
+    return {
+      id: row.id,
+      name: row.name,
+      description: row.description,
+      activeSnapshot: active ? buildSnapshot(active.id) : null,
+      draftSnapshot: draft ? buildSnapshot(draft.id) : null,
+      createdAt: row.created_at,
+      updatedAt: row.updated_at,
+    }
+  }
+
   listAgents(): AgentStatus[] {
     return listDetectedAgents()
   }
@@ -462,6 +672,14 @@ export class WorkflowService {
     const row = this.db.prepare('SELECT * FROM stage_runs WHERE id = ?').get(runId) as StageRunRow | undefined
     if (!row) {
       throw new Error('执行记录不存在')
+    }
+    return row
+  }
+
+  private getProjectRow(projectId: string): ProjectRow {
+    const row = this.db.prepare('SELECT * FROM projects WHERE id = ?').get(projectId) as ProjectRow | undefined
+    if (!row) {
+      throw new Error('项目不存在')
     }
     return row
   }
@@ -754,6 +972,7 @@ export class WorkflowService {
       id: row.id,
       title: row.title,
       description: row.description,
+      projectId: row.project_id,
       state: row.state,
       creatorId: row.creator_id,
       reqOwnerId: row.req_owner_id,
@@ -804,6 +1023,8 @@ export class WorkflowService {
     input: {
       title: string
       description: string
+      projectId: string
+      refreshProjectContext: boolean
       reqOwnerId: string
       pmId: string
       frontendDevId: string
@@ -819,20 +1040,30 @@ export class WorkflowService {
     if (tester.role !== 'tester') {
       throw new Error('测试负责人必须是测试角色用户')
     }
+    this.getProjectRow(input.projectId)
+    const hasActiveSnapshot = Boolean(
+      this.db
+        .prepare("SELECT id FROM project_memory_snapshots WHERE project_id = ? AND status = 'active' LIMIT 1")
+        .get(input.projectId) as { id: string } | undefined,
+    )
+    if (!input.refreshProjectContext && !hasActiveSnapshot) {
+      throw new Error('当前项目还没有有效上下文快照，请先刷新项目上下文')
+    }
     const id = `t-${crypto.randomUUID().slice(0, 8)}`
     const now = nowIso()
     withTransaction(this.db, () => {
       this.db
         .prepare(
           `INSERT INTO tasks (
-            id, title, description, state, creator_id, req_owner_id, pm_id, frontend_dev_id, backend_dev_id,
+            id, title, description, project_id, state, creator_id, req_owner_id, pm_id, frontend_dev_id, backend_dev_id,
             tester_id, frontend_repo, backend_repo, created_at, updated_at
-          ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+          ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
         )
         .run(
           id,
           input.title,
           input.description,
+          input.projectId,
           'pending',
           creator.id,
           input.reqOwnerId,
@@ -849,7 +1080,16 @@ export class WorkflowService {
       let order = 0
       for (const def of STAGE_DEFINITIONS) {
         for (const branch of def.branches) {
-          const status = def.key === 'requirement' ? 'pending' : 'blocked'
+          const status =
+            def.key === 'projectContext'
+              ? input.refreshProjectContext
+                ? 'pending'
+                : 'passed'
+              : def.key === 'requirement'
+                ? input.refreshProjectContext
+                  ? 'blocked'
+                  : 'pending'
+                : 'blocked'
           this.db
             .prepare(
               `INSERT INTO task_stages (
@@ -951,13 +1191,18 @@ export class WorkflowService {
     const branch = stage.branch as Branch
     try {
       const run = this.getStageRunRow(runId)
+      const projectContext =
+        key === 'requirement'
+          ? this.projectMemoryContext(task.project_id, ['shared'])
+          : this.projectMemoryContext(task.project_id, ['shared', 'frontend', 'backend'])
+      const mergedPrompt = [projectContext, effectivePrompt].filter((item) => item.trim()).join('\n\n')
       const result = await (
         key === 'requirement'
           ? runCopilotRequirement(
               {
                 title: task.title,
                 description: task.description,
-                extraPrompt: effectivePrompt,
+                extraPrompt: mergedPrompt,
               },
               { modelId: run.model_id, effort: run.effort },
             )
@@ -966,7 +1211,7 @@ export class WorkflowService {
                 title: task.title,
                 description: task.description,
                 requirementDoc: this.requirementDocForDesign(task.id),
-                extraPrompt: effectivePrompt,
+                extraPrompt: mergedPrompt,
               },
               { modelId: run.model_id, effort: run.effort },
             )
@@ -1021,6 +1266,203 @@ export class WorkflowService {
     return stage.summary || ''
   }
 
+  private projectMemoryContext(projectId: string, scopes: Array<'shared' | 'frontend' | 'backend'>) {
+    const snapshot = this.db
+      .prepare("SELECT id FROM project_memory_snapshots WHERE project_id = ? AND status = 'active' ORDER BY version DESC LIMIT 1")
+      .get(projectId) as { id: string } | undefined
+    if (!snapshot) {
+      return ''
+    }
+    const rows = this.db
+      .prepare(
+        `SELECT scope, category, title, content
+         FROM project_memory_items
+         WHERE snapshot_id = ? AND scope IN (${scopes.map(() => '?').join(',')})
+         ORDER BY CASE scope WHEN 'shared' THEN 0 WHEN 'frontend' THEN 1 ELSE 2 END, created_at ASC`,
+      )
+      .all(snapshot.id, ...scopes) as Array<{ scope: string; category: string; title: string; content: string }>
+    if (!rows.length) {
+      return ''
+    }
+    return [
+      '以下为项目上下文快照，请作为硬约束与背景输入一并纳入：',
+      ...rows.map((item) => `- [${item.scope}/${item.category}] ${item.title}\n${item.content}`),
+    ].join('\n')
+  }
+
+  private executeProjectContextStage(task: TaskRow, stage: StageRow, actor: User, options?: StageExecutionOptions) {
+    this.assertProjectContextExecutor(task, actor)
+    const workspacePath = normalizeRepoPath(options?.workspacePath)
+    if (!workspacePath) {
+      throw new Error('请先选择本地工作区')
+    }
+    const info = statSync(workspacePath, { throwIfNoEntry: false })
+    if (!info?.isDirectory()) {
+      throw new Error('本地工作区必须是有效目录')
+    }
+
+    const isFrontend = actor.id === task.frontend_dev_id
+    const scope = isFrontend ? 'frontend' : 'backend'
+    const currentArtifact = (parseArtifact(stage.artifact_json) ?? {}) as {
+      summary?: string
+      items?: Array<Record<string, unknown>>
+      refreshState?: { frontend?: boolean; backend?: boolean }
+    }
+    const refreshState = {
+      frontend: Boolean(currentArtifact.refreshState?.frontend),
+      backend: Boolean(currentArtifact.refreshState?.backend),
+    }
+    const nextItems = this.scanProjectWorkspaceMemory(workspacePath, scope)
+    const mergedItems = [
+      ...(Array.isArray(currentArtifact.items) ? currentArtifact.items.filter((item) => (item as { scope?: string }).scope !== scope) : []),
+      ...nextItems,
+    ]
+    const nextState = {
+      frontend: isFrontend ? true : refreshState.frontend,
+      backend: isFrontend ? refreshState.backend : true,
+    }
+    const summary = `已从${isFrontend ? '前端' : '后端'}工作区提炼 ${nextItems.length} 条项目记忆。`
+    const nextArtifact = {
+      summary,
+      items: mergedItems,
+      refreshState: nextState,
+    }
+
+    withTransaction(this.db, () => {
+      if (nextState.frontend && nextState.backend) {
+        this.activateProjectSnapshot(task.project_id, {
+          summary: '项目上下文刷新已完成，当前快照可供需求理解与详细设计消费。',
+          items: mergedItems.map((item) => ({
+            category: String(item.category ?? 'best-practice'),
+            title: String(item.title ?? '项目记忆'),
+            content: String(item.content ?? ''),
+            structuredData: item,
+            scope: (item.scope as 'shared' | 'frontend' | 'backend') ?? 'shared',
+            stageScope: 'all',
+            priority: 'medium' as const,
+            status: 'confirmed' as const,
+            sourceType: 'repo-scan',
+            sourceRef: String(item.sourceRef ?? ''),
+          })),
+          triggerType: 'rescan',
+        })
+        this.db
+          .prepare('UPDATE task_stages SET status = ?, summary = ?, artifact_json = ?, pending_note = ?, updated_at = ? WHERE task_id = ? AND stage_key = ? AND branch = ?')
+          .run('passed', '项目上下文刷新已完成。', JSON.stringify(nextArtifact), '', nowIso(), task.id, 'projectContext', 'shared')
+        this.setStageStatus(task.id, 'requirement', 'shared', 'pending')
+        this.addTimeline(task.id, 'stage', '项目上下文刷新完成', this.projectContextPendingNote(nextState), actor.id, 'projectContext', 'shared')
+      } else {
+        this.db
+          .prepare('UPDATE task_stages SET status = ?, summary = ?, artifact_json = ?, pending_note = ?, updated_at = ? WHERE task_id = ? AND stage_key = ? AND branch = ?')
+          .run('review', summary, JSON.stringify(nextArtifact), this.projectContextPendingNote(nextState), nowIso(), task.id, 'projectContext', 'shared')
+        this.addTimeline(task.id, 'stage', '项目上下文刷新进行中', this.projectContextPendingNote(nextState), actor.id, 'projectContext', 'shared')
+      }
+      this.touchTask(task.id)
+    })
+
+    return this.getTaskView(task.id, actor)
+  }
+
+  private activateProjectSnapshot(
+    projectId: string,
+    input: { summary: string; items: Omit<ProjectMemoryItemView, 'id' | 'createdAt' | 'updatedAt'>[]; triggerType: string },
+  ) {
+    const now = nowIso()
+    const active = this.db
+      .prepare("SELECT id, version FROM project_memory_snapshots WHERE project_id = ? AND status = 'active' ORDER BY version DESC LIMIT 1")
+      .get(projectId) as { id: string; version: number } | undefined
+    const snapshotId = `ps-${crypto.randomUUID().slice(0, 8)}`
+    this.db.prepare("UPDATE project_memory_snapshots SET status = 'archived', updated_at = ? WHERE project_id = ? AND status IN ('active','draft')").run(now, projectId)
+    this.db
+      .prepare('INSERT INTO project_memory_snapshots (id, project_id, version, status, summary, based_on_snapshot_id, trigger_type, created_at, updated_at) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)')
+      .run(snapshotId, projectId, (active?.version ?? 0) + 1, 'active', input.summary, active?.id ?? null, input.triggerType, now, now)
+    input.items.forEach((item) => {
+      this.db
+        .prepare(
+          `INSERT INTO project_memory_items (
+            id, project_id, snapshot_id, category, title, content, structured_data, scope, stage_scope, priority, status, source_type, source_ref, created_at, updated_at
+          ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+        )
+        .run(
+          crypto.randomUUID(),
+          projectId,
+          snapshotId,
+          item.category,
+          item.title,
+          item.content,
+          JSON.stringify(item.structuredData ?? null),
+          item.scope,
+          item.stageScope,
+          item.priority,
+          item.status,
+          item.sourceType,
+          item.sourceRef,
+          now,
+          now,
+        )
+    })
+    this.db.prepare('UPDATE projects SET updated_at = ? WHERE id = ?').run(now, projectId)
+  }
+
+  private scanProjectWorkspaceMemory(workspacePath: string, scope: 'frontend' | 'backend') {
+    const docs: Array<{ path: string; content: string }> = []
+    const agentsMd = join(workspacePath, 'AGENTS.md')
+    if (existsSync(agentsMd)) {
+      docs.push({ path: agentsMd, content: this.safeReadTextFile(agentsMd) })
+    }
+    const agentsDir = join(workspacePath, '.agents')
+    if (existsSync(agentsDir) && statSync(agentsDir).isDirectory()) {
+      this.collectTextFiles(agentsDir).forEach((filePath) => {
+        docs.push({ path: filePath, content: this.safeReadTextFile(filePath) })
+      })
+    }
+    if (!docs.length) {
+      throw new Error('所选工作区缺少 AGENTS.md 或 .agents 目录')
+    }
+    return docs.flatMap((doc) => this.extractProjectMemoryItems(workspacePath, doc.path, doc.content, scope))
+  }
+
+  private collectTextFiles(root: string): string[] {
+    const results: string[] = []
+    const stack = [root]
+    while (stack.length) {
+      const current = stack.pop()!
+      for (const entry of readdirSync(current, { withFileTypes: true })) {
+        const fullPath = join(current, entry.name)
+        if (entry.isDirectory()) {
+          stack.push(fullPath)
+        } else if (/\.(md|txt|json|ya?ml)$/i.test(entry.name)) {
+          results.push(fullPath)
+        }
+      }
+    }
+    return results
+  }
+
+  private safeReadTextFile(path: string) {
+    return readFileSync(path, 'utf8')
+  }
+
+  private extractProjectMemoryItems(rootPath: string, filePath: string, content: string, scope: 'frontend' | 'backend') {
+    const normalized = content.replace(/\r\n/g, '\n').trim()
+    if (!normalized) {
+      return []
+    }
+    const sections = normalized.split(/\n(?=##?\s+)/g).filter(Boolean)
+    const category = scope === 'frontend' ? 'component-pattern' : 'service-boundary-rule'
+    return sections.slice(0, 12).map((section, index) => {
+      const lines = section.split('\n').filter(Boolean)
+      const titleLine = lines[0]?.replace(/^#+\s*/, '').trim() || `${basename(filePath)} #${index + 1}`
+      return {
+        scope,
+        category,
+        title: titleLine,
+        content: lines.slice(1).join('\n').trim() || lines[0].trim(),
+        sourceRef: relative(rootPath, filePath) || basename(filePath),
+      }
+    })
+  }
+
   bindRepo(taskId: string, branch: Branch, repoPath: string, actor: User): TaskView {
     const task = this.getTaskRow(taskId)
     const expectedActorId = branch === 'frontend' ? task.frontend_dev_id : task.backend_dev_id
@@ -1071,8 +1513,15 @@ export class WorkflowService {
     if (!def.agentExecuted) {
       throw new Error('该阶段无 agent 执行')
     }
-    if (stage.status !== 'pending') {
+    if (key === 'projectContext') {
+      if (stage.status !== 'pending' && stage.status !== 'review') {
+        throw new Error('当前阶段不可执行')
+      }
+    } else if (stage.status !== 'pending') {
       throw new Error('当前阶段不可执行')
+    }
+    if (key === 'projectContext') {
+      return this.executeProjectContextStage(task, stage, actor, options)
     }
     if (key === 'requirement') {
       this.assertRequirementExecutor(task, actor)
@@ -1255,6 +1704,19 @@ export class WorkflowService {
     if (actor.id !== task.frontend_dev_id && actor.id !== task.backend_dev_id) {
       throw new Error('仅前后端开发可确认详细设计')
     }
+  }
+
+  private assertProjectContextExecutor(task: TaskRow, actor: User) {
+    if (actor.id !== task.frontend_dev_id && actor.id !== task.backend_dev_id) {
+      throw new Error('仅前后端负责人可执行项目上下文刷新')
+    }
+  }
+
+  private projectContextPendingNote(state: { frontend: boolean; backend: boolean }) {
+    if (!state.frontend && !state.backend) return '待前后端刷新'
+    if (!state.frontend) return '待前端刷新'
+    if (!state.backend) return '待后端刷新'
+    return ''
   }
 
   private designConfirmationNote(confirmations: { frontend: boolean; backend: boolean }) {

@@ -4,7 +4,7 @@ export type SystemRole = 'pm' | 'dev' | 'tester' | 'observer'
 
 export type Branch = 'shared' | 'frontend' | 'backend'
 
-export type StageKey = 'requirement' | 'design' | 'development' | 'verification' | 'review' | 'testing' | 'delivery'
+export type StageKey = 'projectContext' | 'requirement' | 'design' | 'development' | 'verification' | 'review' | 'testing' | 'delivery'
 
 // Per-stage-instance status.
 export type StageStatus =
@@ -51,6 +51,7 @@ export interface StageDefinition {
 }
 
 export const STAGE_DEFINITIONS: StageDefinition[] = [
+  { key: 'projectContext', name: '项目上下文刷新', branches: ['shared'], agentExecuted: true, agentName: 'project-context-agent' },
   { key: 'requirement', name: '需求理解', branches: ['shared'], agentExecuted: true, agentName: 'requirement-agent' },
   { key: 'design', name: '详细设计', branches: ['shared'], agentExecuted: true, agentName: 'design-agent' },
   { key: 'development', name: '开发', branches: ['frontend', 'backend'], agentExecuted: true, agentName: 'coding-agent' },
@@ -88,6 +89,7 @@ type PermRoleKey = 'pm' | 'frontendDev' | 'backendDev' | 'tester' | 'owner' | 'o
 // Matrix rows: requirement, design, fe-dev/verify, be-dev/verify, fe-review, be-review, testing, delivery.
 const MATRIX: Record<PermRoleKey, Record<string, string>> = {
   pm: {
+    projectContext: '000',
     requirement: '111',
     design: '000',
     'development:frontend': '000',
@@ -100,6 +102,7 @@ const MATRIX: Record<PermRoleKey, Record<string, string>> = {
     delivery: '000',
   },
   frontendDev: {
+    projectContext: '110',
     requirement: '100',
     design: '111',
     'development:frontend': '111',
@@ -112,6 +115,7 @@ const MATRIX: Record<PermRoleKey, Record<string, string>> = {
     delivery: '000',
   },
   backendDev: {
+    projectContext: '110',
     requirement: '100',
     design: '111',
     'development:frontend': '000',
@@ -124,6 +128,7 @@ const MATRIX: Record<PermRoleKey, Record<string, string>> = {
     delivery: '000',
   },
   tester: {
+    projectContext: '000',
     requirement: '000',
     design: '000',
     'development:frontend': '000',
@@ -137,6 +142,7 @@ const MATRIX: Record<PermRoleKey, Record<string, string>> = {
   },
   owner: {
     // creator / reqOwner
+    projectContext: '000',
     requirement: '100',
     design: '100',
     'development:frontend': '000',
@@ -149,6 +155,7 @@ const MATRIX: Record<PermRoleKey, Record<string, string>> = {
     delivery: '111',
   },
   observer: {
+    projectContext: '000',
     requirement: '000',
     design: '000',
     'development:frontend': '000',
@@ -163,7 +170,7 @@ const MATRIX: Record<PermRoleKey, Record<string, string>> = {
 }
 
 function matrixColumnKey(key: StageKey, branch: Branch): string {
-  if (key === 'requirement' || key === 'design' || key === 'testing' || key === 'delivery') {
+  if (key === 'projectContext' || key === 'requirement' || key === 'design' || key === 'testing' || key === 'delivery') {
     return key
   }
   return `${key}:${branch}`
