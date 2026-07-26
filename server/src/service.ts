@@ -7,7 +7,15 @@ import { listDetectedAgents, type AgentStatus } from './agent-probe.js'
 import { createDatabase, withTransaction } from './db.js'
 import { ensureMockUsers, seedIfEmpty } from './seed.js'
 import { buildDesignArtifact, DESIGN_STAGE_SUMMARY, generateExecution, type ProcessEvent } from './executor.js'
-import { runCopilotDesign, runCopilotRequirement } from './real-agent.js'
+import {
+  runCopilotDelivery,
+  runCopilotDesign,
+  runCopilotDevelopment,
+  runCopilotRequirement,
+  runCopilotReview,
+  runCopilotTesting,
+  runCopilotVerification,
+} from './real-agent.js'
 import {
   STAGE_DEFINITIONS,
   branchLabel,
@@ -481,16 +489,16 @@ export class WorkflowService {
           const verificationStage = this.getStageRow(task.id, 'verification', branch)
           this.syncNormalizedStageArtifact(
             verificationStage,
-            buildVerificationArtifact(branch, verificationStage, this.listVerificationRows(task.id, branch)),
+            buildVerificationArtifact(branch, verificationStage, this.listVerificationRows(task.id, branch), parseArtifact(verificationStage.artifact_json)),
             now,
           )
         }
 
         const testingStage = this.getStageRow(task.id, 'testing', 'shared')
-        this.syncNormalizedStageArtifact(testingStage, buildTestingArtifact(testingStage, this.listTestingBugRows(task.id)), now)
+        this.syncNormalizedStageArtifact(testingStage, buildTestingArtifact(testingStage, this.listTestingBugRows(task.id), parseArtifact(testingStage.artifact_json)), now)
 
         const deliveryStage = this.getStageRow(task.id, 'delivery', 'shared')
-        this.syncNormalizedStageArtifact(deliveryStage, buildDeliveryArtifact(task, deliveryStage), now)
+        this.syncNormalizedStageArtifact(deliveryStage, buildDeliveryArtifact(task, deliveryStage, parseArtifact(deliveryStage.artifact_json)), now)
       }
     })
   }
@@ -1196,28 +1204,117 @@ export class WorkflowService {
           ? this.projectMemoryContext(task.project_id, ['shared'])
           : this.projectMemoryContext(task.project_id, ['shared', 'frontend', 'backend'])
       const mergedPrompt = [projectContext, effectivePrompt].filter((item) => item.trim()).join('\n\n')
-      const result = await (
-        key === 'requirement'
-          ? runCopilotRequirement(
-              {
-                title: task.title,
-                description: task.description,
-                extraPrompt: mergedPrompt,
-              },
-              { modelId: run.model_id, effort: run.effort },
-            )
-          : runCopilotDesign(
-              {
-                title: task.title,
-                description: task.description,
-                requirementDoc: this.requirementDocForDesign(task.id),
-                extraPrompt: mergedPrompt,
-              },
-              { modelId: run.model_id, effort: run.effort },
-            )
-      )
+      let result
+      if (key === 'requirement') {
+        result = await runCopilotRequirement(
+          {
+            title: task.title,
+            description: task.description,
+            extraPrompt: mergedPrompt,
+          },
+          { modelId: run.model_id, effort: run.effort },
+        )
+      } else if (key === 'design') {
+        result = await runCopilotDesign(
+          {
+            title: task.title,
+            description: task.description,
+            requirementDoc: this.requirementDocForDesign(task.id),
+            extraPrompt: mergedPrompt,
+          },
+          { modelId: run.model_id, effort: run.effort },
+        )
+      } else if (key === 'development') {
+        const repo = this.requireBranchRepo(task, branch as Extract<Branch, 'frontend' | 'backend'>)
+        result = await runCopilotDevelopment(
+          {
+            branch: branch as Extract<Branch, 'frontend' | 'backend'>,
+            title: task.title,
+            description: task.description,
+            requirementDoc: this.requirementDocForDesign(task.id),
+            designDoc: this.designDocForExecution(task.id),
+            extraPrompt: mergedPrompt,
+            rejectionNote: stage.pending_note,
+          },
+          { modelId: run.model_id, effort: run.effort, cwd: repo.path },
+        )
+      } else if (key === 'verification') {
+        const repo = this.requireBranchRepo(task, branch as Extract<Branch, 'frontend' | 'backend'>)
+        result = await runCopilotVerification(
+          {
+            branch: branch as Extract<Branch, 'frontend' | 'backend'>,
+            title: task.title,
+            description: task.description,
+            designDoc: this.designDocForExecution(task.id),
+            developmentArtifact: this.stageArtifactContext(task.id, 'development', branch),
+            extraPrompt: mergedPrompt,
+          },
+          { modelId: run.model_id, effort: run.effort, cwd: repo.path },
+        )
+      } else if (key === 'review') {
+        const repo = this.requireBranchRepo(task, branch as Extract<Branch, 'frontend' | 'backend'>)
+        result = await runCopilotReview(
+          {
+            branch: branch as Extract<Branch, 'frontend' | 'backend'>,
+            title: task.title,
+            description: task.description,
+            requirementDoc: this.requirementDocForDesign(task.id),
+            designDoc: this.designDocForExecution(task.id),
+            developmentArtifact: this.stageArtifactContext(task.id, 'development', branch),
+            extraPrompt: mergedPrompt,
+          },
+          { modelId: run.model_id, effort: run.effort, cwd: repo.path },
+        )
+      } else if (key === 'testing') {
+        result = await runCopilotTesting(
+          {
+            title: task.title,
+            description: task.description,
+            requirementDoc: this.requirementDocForDesign(task.id),
+            designDoc: this.designDocForExecution(task.id),
+            frontendDevelopmentArtifact: this.stageArtifactContext(task.id, 'development', 'frontend'),
+            backendDevelopmentArtifact: this.stageArtifactContext(task.id, 'development', 'backend'),
+            frontendReviewArtifact: this.stageArtifactContext(task.id, 'review', 'frontend'),
+            backendReviewArtifact: this.stageArtifactContext(task.id, 'review', 'backend'),
+            bugContext: this.testingBugContext(task.id),
+            extraPrompt: mergedPrompt,
+          },
+          { modelId: run.model_id, effort: run.effort },
+        )
+      } else if (key === 'delivery') {
+        const frontendRepo = parseRepoField(task.frontend_repo)
+        const backendRepo = parseRepoField(task.backend_repo)
+        result = await runCopilotDelivery(
+          {
+            title: task.title,
+            description: task.description,
+            requirementDoc: this.requirementDocForDesign(task.id),
+            designDoc: this.designDocForExecution(task.id),
+            testingArtifact: this.stageArtifactContext(task.id, 'testing', 'shared'),
+            frontendRepoLabel: frontendRepo ? `${frontendRepo.name}${frontendRepo.branch ? ` @ ${frontendRepo.branch}` : ''}` : '未绑定',
+            backendRepoLabel: backendRepo ? `${backendRepo.name}${backendRepo.branch ? ` @ ${backendRepo.branch}` : ''}` : '未绑定',
+            extraPrompt: mergedPrompt,
+          },
+          { modelId: run.model_id, effort: run.effort },
+        )
+      } else {
+        throw new Error('当前阶段暂不支持真实执行')
+      }
 
       this.appendRunProcessEvents(runId, result.process)
+
+      const postStatus =
+        key === 'development'
+          ? 'passed'
+          : key === 'verification' || key === 'testing' || key === 'delivery'
+            ? 'pending'
+            : 'review'
+      const pendingNote =
+        key === 'design'
+          ? this.designConfirmationNote({ frontend: false, backend: false })
+          : key === 'testing'
+            ? this.getStageRow(task.id, 'testing', 'shared').pending_note
+            : ''
 
       withTransaction(this.db, () => {
         this.db
@@ -1226,10 +1323,10 @@ export class WorkflowService {
         this.db
           .prepare('UPDATE task_stages SET status = ?, summary = ?, artifact_json = ?, pending_note = ?, active_run_id = NULL, updated_at = ? WHERE task_id = ? AND stage_key = ? AND branch = ?')
           .run(
-            'review',
+            postStatus,
             result.summary,
             JSON.stringify(result.artifact),
-            key === 'design' ? this.designConfirmationNote({ frontend: false, backend: false }) : '',
+            pendingNote,
             nowIso(),
             task.id,
             key,
@@ -1237,6 +1334,10 @@ export class WorkflowService {
           )
         if (key === 'requirement') {
           this.replaceClarifications(task.id, result.clarifications ?? [])
+        } else if (key === 'development') {
+          this.setStageStatus(task.id, 'verification', branch, 'pending')
+          this.refreshVerificationStageArtifact(task.id, branch)
+          this.addTimeline(task.id, 'stage', `${stageDisplayName('verification', branch)} 可开始`, '自动进入功能验证', '', 'verification', branch)
         }
         this.touchTask(task.id)
         this.addTimeline(task.id, 'stage', `${stageDisplayName(key, branch)} 真实执行完成`, '', actor.id, key, branch)
@@ -1264,6 +1365,48 @@ export class WorkflowService {
       return artifact.fullDoc.trim()
     }
     return stage.summary || ''
+  }
+
+  private designDocForExecution(taskId: string) {
+    const stage = this.getStageRow(taskId, 'design', 'shared')
+    const artifact = parseArtifact(stage.artifact_json)
+    if (!artifact) {
+      return stage.summary || ''
+    }
+    return compactStrings([
+      typeof artifact.summary === 'string' ? artifact.summary : stage.summary,
+      typeof artifact.frontendDesign === 'string' ? artifact.frontendDesign : '',
+      typeof artifact.backendDesign === 'string' ? artifact.backendDesign : '',
+      typeof artifact.apiDoc === 'string' ? artifact.apiDoc : '',
+      typeof artifact.testCases === 'string' ? artifact.testCases : '',
+    ]).join('\n\n')
+  }
+
+  private stageArtifactContext(taskId: string, key: StageKey, branch: Branch) {
+    const stage = this.getStageRow(taskId, key, branch)
+    const artifact = parseArtifact(stage.artifact_json)
+    if (!artifact) {
+      return stage.summary || ''
+    }
+    return JSON.stringify({ summary: stage.summary, ...artifact }, null, 2)
+  }
+
+  private requireBranchRepo(task: TaskRow, branch: Extract<Branch, 'frontend' | 'backend'>) {
+    const repo = branch === 'frontend' ? parseRepoField(task.frontend_repo) : parseRepoField(task.backend_repo)
+    if (!repo) {
+      throw new Error(`请先绑定${branch === 'frontend' ? '前端' : '后端'}仓库`)
+    }
+    return repo
+  }
+
+  private testingBugContext(taskId: string) {
+    const bugs = this.listTestingBugRows(taskId)
+    if (!bugs.length) {
+      return ''
+    }
+    return bugs
+      .map((bug) => `${bug.seq}. [${testingBugTargetLabel(bug.target)} · ${testingBugStatusLabel(bug.status)}] ${bug.detail}`)
+      .join('\n')
   }
 
   private projectMemoryContext(projectId: string, scopes: Array<'shared' | 'frontend' | 'backend'>) {
@@ -1504,8 +1647,7 @@ export class WorkflowService {
     return this.getTaskView(taskId, actor)
   }
 
-  // Execute a stage, using real background execution for requirement/design and
-  // the existing mock path for the remaining agent-driven stages.
+  // Execute a stage, using real background execution for all agent-driven stages.
   executeStage(taskId: string, key: StageKey, branch: Branch, actor: User, options?: StageExecutionOptions): TaskView {
     const task = this.getTaskRow(taskId)
     const stage = this.getStageRow(taskId, key, branch)
@@ -1532,53 +1674,7 @@ export class WorkflowService {
         throw new Error(`请先绑定${branch === 'frontend' ? '前端' : '后端'}仓库`)
       }
     }
-
-    if (key === 'requirement' || key === 'design') {
-      return this.startRealStageExecution(task, stage, actor, options)
-    }
-
-    const effectivePrompt = options?.prompt === undefined ? stage.extra_prompt : options.prompt.trim()
-    const result = generateExecution(key, branch, task.title, effectivePrompt, stage.pending_note)
-    const artifactWithSummary = { ...result.artifact, summary: result.summary }
-    const now = nowIso()
-    const runId = crypto.randomUUID()
-    const runIndex = stage.run_count + 1
-    this.runProcesses.set(runId, result.process)
-
-    withTransaction(this.db, () => {
-      if (task.state === 'pending') {
-        this.db.prepare('UPDATE tasks SET state = ? WHERE id = ?').run('in_progress', taskId)
-      }
-      this.db
-        .prepare(
-          `INSERT INTO stage_runs (
-            id, task_id, stage_key, branch, run_index, status, executor_id, extra_prompt, process_json, artifact_json, reveal_interval_ms, started_at, finished_at
-          ) VALUES (?, ?, ?, ?, ?, 'running', ?, ?, ?, ?, 700, ?, NULL)`,
-        )
-        .run(
-          runId,
-          taskId,
-          key,
-          branch,
-          runIndex,
-          actor.id,
-          effectivePrompt,
-          '[]',
-          JSON.stringify(artifactWithSummary),
-          now,
-        )
-
-      this.db
-        .prepare(
-          'UPDATE task_stages SET status = ?, run_count = ?, active_run_id = ?, extra_prompt = ?, pending_note = ?, updated_at = ? WHERE task_id = ? AND stage_key = ? AND branch = ?',
-        )
-        .run('running', runIndex, runId, effectivePrompt, '', now, taskId, key, branch)
-
-      this.touchTask(taskId)
-      this.addTimeline(taskId, 'executing', `${stageDisplayName(key, branch)} 开始执行`, '', actor.id, key, branch)
-    })
-
-    return this.getTaskView(taskId, actor)
+    return this.startRealStageExecution(task, stage, actor, options)
   }
 
   // Reveal count for a running run based on elapsed time.
@@ -2028,7 +2124,8 @@ export class WorkflowService {
   }
 
   private refreshTestingStageArtifact(taskId: string) {
-    const normalized = buildTestingArtifact(this.getStageRow(taskId, 'testing', 'shared'), this.listTestingBugRows(taskId))
+    const stage = this.getStageRow(taskId, 'testing', 'shared')
+    const normalized = buildTestingArtifact(stage, this.listTestingBugRows(taskId), parseArtifact(stage.artifact_json))
     const bugCount = this.listTestingBugRows(taskId).length
     const unresolved = this.unresolvedTestingBugs(taskId).length
     const pendingNote =
@@ -2040,7 +2137,7 @@ export class WorkflowService {
 
   private refreshVerificationStageArtifact(taskId: string, branch: Branch) {
     const stage = this.getStageRow(taskId, 'verification', branch)
-    const normalized = buildVerificationArtifact(branch, stage, this.listVerificationRows(taskId, branch))
+    const normalized = buildVerificationArtifact(branch, stage, this.listVerificationRows(taskId, branch), parseArtifact(stage.artifact_json))
     this.db
       .prepare('UPDATE task_stages SET summary = ?, artifact_json = ?, updated_at = ? WHERE task_id = ? AND stage_key = ? AND branch = ?')
       .run(normalized.summary, JSON.stringify(normalized.artifact), nowIso(), taskId, 'verification', branch)
@@ -2049,7 +2146,7 @@ export class WorkflowService {
   private refreshDeliveryStageArtifact(taskId: string) {
     const task = this.getTaskRow(taskId)
     const stage = this.getStageRow(taskId, 'delivery', 'shared')
-    const normalized = buildDeliveryArtifact(task, stage)
+    const normalized = buildDeliveryArtifact(task, stage, parseArtifact(stage.artifact_json))
     this.db
       .prepare('UPDATE task_stages SET summary = ?, artifact_json = ?, updated_at = ? WHERE task_id = ? AND stage_key = ? AND branch = ?')
       .run(normalized.summary, JSON.stringify(normalized.artifact), nowIso(), taskId, 'delivery', 'shared')
@@ -2480,20 +2577,21 @@ function buildVerificationArtifact(
   branch: Branch,
   stage: StageRow,
   history: Array<{ result: 'pass' | 'reject'; reason: string }>,
+  currentArtifact: Record<string, unknown> | null,
 ) {
   const latest = history.length ? history[history.length - 1] : null
-  const verificationScope = [`${branchLabel(branch)}分支对应功能点验证`]
+  const verificationScope = asStringArrayValue(currentArtifact?.verificationScope).length
+    ? asStringArrayValue(currentArtifact?.verificationScope)
+    : [`${branchLabel(branch)}分支对应功能点验证`]
   const verificationResult = latest?.result === 'pass' ? '通过' : latest?.result === 'reject' ? '驳回' : stage.status === 'pending' ? '待验证' : '未开始'
-  const passBasis = latest?.result === 'pass' ? '功能验证已通过，可进入代码审查。' : ''
-  const rejectionReason = latest?.result === 'reject' ? latest.reason : ''
+  const passBasis = latest?.result === 'pass' ? '功能验证已通过，可进入代码审查。' : asStringValue(currentArtifact?.passBasis)
+  const rejectionReason = latest?.result === 'reject' ? latest.reason : asStringValue(currentArtifact?.rejectionReason)
   const summary =
     latest?.result === 'pass'
       ? `${stageDisplayName('verification', branch)}已通过，进入代码审查。`
       : latest?.result === 'reject'
         ? `${stageDisplayName('verification', branch)}已驳回，等待开发修复。`
-        : stage.status === 'pending'
-          ? `${stageDisplayName('verification', branch)}待人工验证。`
-          : `${stageDisplayName('verification', branch)}尚未开放。`
+        : pickSummary(currentArtifact, stage.summary, stage.status === 'pending' ? `${stageDisplayName('verification', branch)}待人工验证。` : `${stageDisplayName('verification', branch)}尚未开放。`)
   return {
     summary,
     artifact: withCommonArtifactFields(
@@ -2535,6 +2633,7 @@ function buildTestingArtifact(
     created_at: string
     updated_at: string
   }>,
+  currentArtifact: Record<string, unknown> | null,
 ) {
   const bugs = bugRows.map((bug) => ({
     id: bug.id,
@@ -2570,19 +2669,28 @@ function buildTestingArtifact(
         ? bugSummary
         : bugs.length > 0
           ? '全部 Bug 已关闭，可执行测试通过。'
-          : stage.status === 'pending'
-            ? '测试阶段待执行。'
-            : '测试阶段尚未开放。'
+          : pickSummary(currentArtifact, stage.summary, stage.status === 'pending' ? '测试阶段待执行。' : '测试阶段尚未开放。')
   return {
     summary,
     artifact: withCommonArtifactFields(
       {
         bugs,
-        testScope: ['主流程联调', '已提交 Bug 的回归验证'],
-        executionResult: unresolved > 0 ? `当前仍有 ${unresolved} 条未关闭 Bug。` : bugs.length ? '全部历史 Bug 已完成回归关闭。' : '尚未记录测试缺陷。',
+        testScope: asStringArrayValue(currentArtifact?.testScope).length ? asStringArrayValue(currentArtifact?.testScope) : ['主流程联调', '已提交 Bug 的回归验证'],
+        executionResult:
+          unresolved > 0
+            ? `当前仍有 ${unresolved} 条未关闭 Bug。`
+            : bugs.length
+              ? '全部历史 Bug 已完成回归关闭。'
+              : asStringValue(currentArtifact?.executionResult) || '尚未记录测试缺陷。',
         bugSummary,
         regressionConclusion:
-          fixedCount > 0 ? `仍有 ${fixedCount} 条 Bug 待回归。` : unresolved > 0 ? '存在待修复 Bug，回归未完成。' : bugs.length ? '历史 Bug 已全部关闭。' : '暂无回归项。',
+          fixedCount > 0
+            ? `仍有 ${fixedCount} 条 Bug 待回归。`
+            : unresolved > 0
+              ? '存在待修复 Bug，回归未完成。'
+              : bugs.length
+                ? '历史 Bug 已全部关闭。'
+                : asStringValue(currentArtifact?.regressionConclusion) || '暂无回归项。',
         testConclusion,
       },
       summary,
@@ -2598,29 +2706,34 @@ function buildTestingArtifact(
   }
 }
 
-function buildDeliveryArtifact(task: TaskRow, stage: StageRow) {
+function buildDeliveryArtifact(task: TaskRow, stage: StageRow, currentArtifact: Record<string, unknown> | null) {
   const frontendRepo = parseRepoField(task.frontend_repo)
   const backendRepo = parseRepoField(task.backend_repo)
-  const deliveryItems = compactStrings([
-    frontendRepo ? `前端仓库：${frontendRepo.branch ? `${frontendRepo.name} @ ${frontendRepo.branch}` : frontendRepo.name}` : '前端仓库：未绑定',
-    backendRepo ? `后端仓库：${backendRepo.branch ? `${backendRepo.name} @ ${backendRepo.branch}` : backendRepo.name}` : '后端仓库：未绑定',
-    `任务标题：${task.title}`,
-  ])
+  const deliveryItems = asStringArrayValue(currentArtifact?.deliveryItems).length
+    ? asStringArrayValue(currentArtifact?.deliveryItems)
+    : compactStrings([
+        frontendRepo ? `前端仓库：${frontendRepo.branch ? `${frontendRepo.name} @ ${frontendRepo.branch}` : frontendRepo.name}` : '前端仓库：未绑定',
+        backendRepo ? `后端仓库：${backendRepo.branch ? `${backendRepo.name} @ ${backendRepo.branch}` : backendRepo.name}` : '后端仓库：未绑定',
+        `任务标题：${task.title}`,
+      ])
   const summary =
     stage.status === 'passed'
       ? '交付沉淀已完成，任务已闭环。'
-      : stage.status === 'pending'
-        ? '交付沉淀待确认。'
-        : '交付沉淀尚未开放。'
+      : pickSummary(currentArtifact, stage.summary, stage.status === 'pending' ? '交付沉淀待确认。' : '交付沉淀尚未开放。')
   return {
     summary,
     artifact: withCommonArtifactFields(
       {
         deliveryItems,
-        releaseNotes: stage.status === 'passed' ? '本轮需求已完成交付，可按交付清单进行交接。' : '测试通过后在此整理上线说明与交付说明。',
-        rollbackPlan: '可回退到需求理解、详细设计、前端开发或后端开发。',
+        releaseNotes:
+          stage.status === 'passed'
+            ? '本轮需求已完成交付，可按交付清单进行交接。'
+            : asStringValue(currentArtifact?.releaseNotes) || '测试通过后在此整理上线说明与交付说明。',
+        rollbackPlan: asStringValue(currentArtifact?.rollbackPlan) || '可回退到需求理解、详细设计、前端开发或后端开发。',
         handoffConclusion:
-          stage.status === 'passed' ? '交付完成，任务闭环结束。' : stage.status === 'pending' ? '待交付执行人确认最终交付结果。' : '当前未形成有效交付结论。',
+          stage.status === 'passed'
+            ? '交付完成，任务闭环结束。'
+            : asStringValue(currentArtifact?.handoffConclusion) || (stage.status === 'pending' ? '待交付执行人确认最终交付结果。' : '当前未形成有效交付结论。'),
       },
       summary,
       compactStrings([
@@ -2659,8 +2772,8 @@ function parseArtifact(value: string) {
   }
 }
 
-function pickSummary(artifact: Record<string, unknown>, stageSummary: string, fallback: string) {
-  return asStringValue(artifact.summary) || stageSummary || fallback
+function pickSummary(artifact: Record<string, unknown> | null, stageSummary: string, fallback: string) {
+  return asStringValue(artifact?.summary) || stageSummary || fallback
 }
 
 function compactStrings(values: Array<string | null | undefined>) {

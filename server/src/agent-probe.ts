@@ -251,7 +251,8 @@ function cloneAgents(agents: AgentStatus[]): AgentStatus[] {
 
 function commandExists(command: string): boolean {
   try {
-    const result = execFileSync('where', [command], { encoding: 'utf8', stdio: ['ignore', 'pipe', 'ignore'] })
+    const probeCommand = process.platform === 'win32' ? 'where' : 'which'
+    const result = execFileSync(probeCommand, [command], { encoding: 'utf8', stdio: ['ignore', 'pipe', 'ignore'] })
     return Boolean(result.trim())
   } catch {
     return false

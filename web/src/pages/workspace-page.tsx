@@ -197,6 +197,7 @@ export function WorkspacePage() {
     users,
     currentUser,
     logout,
+    projects,
     tasks,
     loading,
     error,
@@ -269,6 +270,13 @@ export function WorkspacePage() {
     }
     return selectedTask.stages.find((stage) => stageKey(stage) === selectedStageKey) ?? selectedTask.stages[0] ?? null
   }, [selectedStageKey, selectedTask])
+
+  const selectedProjectName = useMemo(() => {
+    if (!selectedTask) {
+      return ''
+    }
+    return projects.find((project) => project.id === selectedTask.projectId)?.name ?? '未关联项目'
+  }, [projects, selectedTask])
 
   const openStages = useMemo(
     () => selectedTask?.stages.filter((stage) => stage.status === 'running' || stage.status === 'review' || stage.status === 'pending') ?? [],
@@ -830,6 +838,9 @@ export function WorkspacePage() {
             <div className="flex flex-wrap items-center justify-between gap-2">
               <div className="flex min-w-0 flex-wrap items-center gap-x-3 gap-y-1">
                 <h1 className="min-w-0 text-lg font-semibold leading-tight">{selectedTask.title}</h1>
+                <Badge variant="secondary" className="shrink-0 border border-sky-200 bg-sky-50 px-2.5 py-0.5 text-sky-700 dark:border-sky-900/60 dark:bg-sky-950/40 dark:text-sky-300">
+                  {selectedProjectName}
+                </Badge>
                 <p className="shrink-0 text-sm text-muted-foreground">{selectedStage.name}</p>
                 {selectedStage.branch !== 'shared' ? (
                   <Badge variant="outline" className="px-2 py-0.5">
@@ -3088,7 +3099,15 @@ function getDefaultStageKey(task: TaskView) {
 }
 
 function isAgentStage(key: StageKey) {
-  return key === 'projectContext' || key === 'requirement' || key === 'design' || key === 'development' || key === 'review'
+  return (
+    key === 'projectContext' ||
+    key === 'requirement' ||
+    key === 'design' ||
+    key === 'development' ||
+    key === 'review' ||
+    key === 'testing' ||
+    key === 'delivery'
+  )
 }
 
 function formatDateTime(value: string) {
@@ -3251,19 +3270,8 @@ function stageAgentSettingKey(taskId: string, stage: StageView, agentId: AgentOp
   return `${stageAgentSelectionKey(taskId, stage)}:${agentId}`
 }
 
-function defaultAgentForStage(stage: StageView | null, agents: AgentStatus[]): AgentOptionId {
-  const preferred =
-    stage?.key === 'requirement'
-      ? 'copilot'
-      : stage?.key === 'design'
-        ? 'copilot'
-        : stage?.key === 'development'
-          ? 'codex'
-          : stage?.key === 'review' || stage?.key === 'verification'
-            ? 'copilot'
-            : 'gemini'
-
-  return preferredAgentName(agents, preferred)
+function defaultAgentForStage(_stage: StageView | null, agents: AgentStatus[]): AgentOptionId {
+  return preferredAgentName(agents, 'copilot')
 }
 
 function defaultAgentPanelState(agent: AgentStatus): AgentPanelState {

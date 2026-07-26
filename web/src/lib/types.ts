@@ -125,6 +125,7 @@ export interface TaskView {
   id: string
   title: string
   description: string
+  projectId: string
   state: string
   creatorId: string
   reqOwnerId: string

@@ -10,7 +10,7 @@ export type StageKey = 'projectContext' | 'requirement' | 'design' | 'developmen
 export type StageStatus =
   | 'blocked' // upstream not complete, cannot start
   | 'pending' // ready to execute / take manual action
-  | 'running' // agent executing (mock)
+  | 'running' // agent executing
   | 'review' // executed, awaiting human action (confirm / verify / pass)
   | 'passed' // completed and moved on
 
@@ -57,8 +57,8 @@ export const STAGE_DEFINITIONS: StageDefinition[] = [
   { key: 'development', name: '开发', branches: ['frontend', 'backend'], agentExecuted: true, agentName: 'coding-agent' },
   { key: 'verification', name: '功能验证', branches: ['frontend', 'backend'], agentExecuted: false, agentName: '' },
   { key: 'review', name: '代码审查', branches: ['frontend', 'backend'], agentExecuted: true, agentName: 'review-agent' },
-  { key: 'testing', name: '测试', branches: ['shared'], agentExecuted: false, agentName: '' },
-  { key: 'delivery', name: '交付沉淀', branches: ['shared'], agentExecuted: false, agentName: '' },
+  { key: 'testing', name: '测试', branches: ['shared'], agentExecuted: true, agentName: 'testing-agent' },
+  { key: 'delivery', name: '交付沉淀', branches: ['shared'], agentExecuted: true, agentName: 'delivery-agent' },
 ]
 
 export function getStageDefinition(key: StageKey): StageDefinition {
@@ -137,7 +137,7 @@ const MATRIX: Record<PermRoleKey, Record<string, string>> = {
     'verification:backend': '000',
     'review:frontend': '000',
     'review:backend': '000',
-    testing: '011',
+    testing: '111',
     delivery: '000',
   },
   owner: {
